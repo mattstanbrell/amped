@@ -157,7 +157,7 @@ def find_matching_filter_end(text: str, start: int) -> int:
 
 def process_inline_filters(content: str, current_platform: str) -> str:
     """Process InlineFilter blocks in MDX content using regex."""
-    print(f"\nProcessing inline filters for platform: {current_platform}")
+    # print(f"\nProcessing inline filters for platform: {current_platform}")
     
     def find_matching_end(text: str, start: int) -> int:
         """Find the matching closing InlineFilter tag, handling nested tags."""
@@ -206,7 +206,7 @@ def process_inline_filters(content: str, current_platform: str) -> str:
     
     def process_recursive(text: str, depth: int = 0) -> str:
         indent = "  " * depth
-        print(f"{indent}Processing at depth {depth}")
+        # print(f"{indent}Processing at depth {depth}")
         
         result = []
         pos = 0
@@ -237,14 +237,14 @@ def process_inline_filters(content: str, current_platform: str) -> str:
             # Extract platforms string
             platforms_str = text[filters_start:tag_end]
             platforms = re.findall(r'["\']([a-zA-Z0-9-]+)["\']', platforms_str)
-            print(f"{indent}Found InlineFilter with platforms: {platforms}")
+            # print(f"{indent}Found InlineFilter with platforms: {platforms}")
             
             # Find the matching end tag
             content_start = tag_end + 1
             content_end = find_matching_end(text, content_start)
             
             if content_end == -1:
-                print(f"{indent}Warning: No matching end tag found")
+                # print(f"{indent}Warning: No matching end tag found")
                 pos = start_tag + 1
                 continue
             
@@ -257,12 +257,12 @@ def process_inline_filters(content: str, current_platform: str) -> str:
             should_include = not platforms or current_platform in platforms
             
             if should_include:
-                print(f"{indent}Including content for {current_platform}")
+                # print(f"{indent}Including content for {current_platform}")
                 # Recursively process any nested filters
                 processed_content = process_recursive(inner_content, depth + 1)
                 result.append(processed_content)
-            else:
-                print(f"{indent}Excluding content for {current_platform} (not in {platforms})")
+            # else:
+                # print(f"{indent}Excluding content for {current_platform} (not in {platforms})")
             
             # Move past this entire block
             pos = content_end
@@ -299,7 +299,7 @@ def embed_schema(content: str, file_path: Path) -> str:
         # Resolve the schema path relative to the file
         schema_file = file_path.parent / schema_path
         if not schema_file.exists():
-            print(f"Warning: Schema file not found: {schema_file}")
+            # print(f"Warning: Schema file not found: {schema_file}")
             continue
             
         try:
@@ -326,10 +326,96 @@ def embed_schema(content: str, file_path: Path) -> str:
             
     return content
 
+def convert_ui_table_to_markdown(content: str) -> str:
+    """Convert @aws-amplify/ui-react Table components to markdown tables."""
+    # First find all Table components
+    table_pattern = re.compile(
+        r'<Table[^>]*>.*?</Table>',
+        re.DOTALL
+    )
+    
+    def process_table(table_match: str) -> str:
+        # Extract caption if present
+        caption = ''
+        caption_match = re.search(r'caption="([^"]*)"', table_match)
+        if caption_match:
+            caption = caption_match.group(1)
+        
+        # Process header
+        header_pattern = re.compile(
+            r'<TableHead>.*?<TableRow>(.*?)</TableRow>.*?</TableHead>',
+            re.DOTALL
+        )
+        header_match = header_pattern.search(table_match)
+        if not header_match:
+            return table_match  # Return original if no header found
+            
+        # Extract header cells
+        header_cells = []
+        for cell in re.finditer(r'<TableCell[^>]*>(.*?)</TableCell>', header_match.group(1), re.DOTALL):
+            cell_content = cell.group(1).strip()
+            header_cells.append(cell_content)
+            
+        # Process body
+        body_pattern = re.compile(
+            r'<TableBody>(.*?)</TableBody>',
+            re.DOTALL
+        )
+        body_match = body_pattern.search(table_match)
+        if not body_match:
+            return table_match  # Return original if no body found
+            
+        # Build markdown table
+        markdown_rows = []
+        
+        # Add caption if present
+        if caption:
+            markdown_rows.append(f"\n{caption}\n")
+            
+        # Add header
+        markdown_rows.append('| ' + ' | '.join(header_cells) + ' |')
+        markdown_rows.append('|' + '---|' * len(header_cells))
+        
+        # Process each row in body
+        row_pattern = re.compile(r'<TableRow[^>]*>(.*?)</TableRow>', re.DOTALL)
+        for row_match in row_pattern.finditer(body_match.group(1)):
+            row_cells = []
+            for cell in re.finditer(r'<TableCell[^>]*>(.*?)</TableCell>', row_match.group(1), re.DOTALL):
+                cell_content = cell.group(1)
+                
+                # Handle links
+                cell_content = re.sub(
+                    r'<a href="([^"]+)"[^>]*>(.*?)</a>',
+                    r'[\2](\1)',
+                    cell_content
+                )
+                
+                # Handle strong tags
+                cell_content = re.sub(
+                    r'<strong>(.*?)</strong>',
+                    r'**\1**',
+                    cell_content
+                )
+                
+                # Clean up any remaining HTML-like tags
+                cell_content = re.sub(r'<[^>]+>', '', cell_content)
+                cell_content = cell_content.strip()
+                row_cells.append(cell_content)
+                
+            markdown_rows.append('| ' + ' | '.join(row_cells) + ' |')
+            
+        return '\n'.join(markdown_rows)
+    
+    # Replace each table with its markdown equivalent
+    return table_pattern.sub(lambda m: process_table(m.group(0)), content)
+
 def process_fragments(content: str, file_path: Path, platform: str, workspace_root: Path) -> str:
     """Process fragment imports and components in MDX content."""
     # First embed any JSON schemas
     content = embed_schema(content, file_path)
+    
+    # Convert UI tables to markdown
+    content = convert_ui_table_to_markdown(content)
     
     # Track imported fragments
     fragment_imports = {}
@@ -391,28 +477,129 @@ def process_fragments(content: str, file_path: Path, platform: str, workspace_ro
                 fragment_content = process_inline_filters(fragment_content, platform)
                 return fragment_content.strip()
             except Exception as e:
-                print(f"Warning: Error processing fragment {fragment_path}: {e}")
+                # print(f"Warning: Error processing fragment {fragment_path}: {e}")
                 return ''
-        else:
-            if fragment_path:
-                print(f"Warning: Fragment file not found: {fragment_path}")
-            else:
-                print(f"Warning: No matching fragment found for platform {platform}")
+        # else:
+        #     if fragment_path:
+        #         # print(f"Warning: Fragment file not found: {fragment_path}")
+        #     else:
+        #         # print(f"Warning: No matching fragment found for platform {platform}")
         
         return ''  # Remove the Fragments component if no matching content
     
     content = fragments_pattern.sub(fragments_repl, content)
     return content
 
+def split_content_and_code_blocks(content: str) -> list[tuple[str, bool]]:
+    """Split content into alternating non-code and code blocks.
+    Returns a list of (content, is_code_block) tuples."""
+    parts = []
+    current_pos = 0
+    
+    # Match code blocks that may have an optional language specifier
+    # e.g. ```python, ```ts, ```json, or just ```
+    code_block_pattern = re.compile(
+        r'(```(?:[a-zA-Z]+\s*\n|[a-zA-Z]*\s*\n|)\s*[\s\S]*?```)',
+        re.DOTALL
+    )
+    
+    for match in code_block_pattern.finditer(content):
+        # Add non-code content before this block
+        if match.start() > current_pos:
+            parts.append((content[current_pos:match.start()], False))
+        
+        # Add the code block
+        parts.append((match.group(0), True))
+        current_pos = match.end()
+    
+    # Add any remaining non-code content
+    if current_pos < len(content):
+        parts.append((content[current_pos:], False))
+    
+    return parts
+
+def remove_imports(content: str, file_path: Path | None = None) -> str:
+    """Remove specific imports while preserving code blocks."""
+    parts = split_content_and_code_blocks(content)
+    result = []
+    
+    # List of specific import patterns to remove
+    import_patterns = [
+        # Next.js specific imports
+        r'^import\s*{\s*getCustomStaticPath\s*}\s*from\s*[\'"]@/utils/getCustomStaticPath[\'"];\s*\n?',
+        r'^import\s*{\s*getChildPageNodes\s*}\s*from\s*[\'"]@/utils/getChildPageNodes[\'"];\s*\n?',
+        # Specific schema imports
+        r'^import\s+\w+\s+from\s+[\'"].*?amplify-outputs-schema-v1\.json[\'"];\s*\n?',
+        # All imports from Icons directory
+        r'^import\s*{[^}]+}\s*from\s*[\'"]@/components/Icons/[^\'"]+[\'"];?\s*$\n?'
+    ]
+    
+    # Pattern to find all imports for logging
+    all_imports_pattern = re.compile(r'^import\s+.*?;?\s*$', re.MULTILINE)
+    
+    # Collect all unfiltered imports across all non-code blocks
+    unfiltered_imports = []
+    
+    for part, is_code_block in parts:
+        if not is_code_block:
+            # Get all imports in this non-code block
+            imports_to_check = [m.group(0).strip() for m in all_imports_pattern.finditer(part)]
+            
+            # Remove the imports we know we want to remove
+            filtered_part = part
+            for pattern in import_patterns:
+                filtered_part = re.sub(pattern, '', filtered_part, flags=re.MULTILINE)
+            
+            # After removal, check which imports are still present
+            remaining_imports = [m.group(0).strip() for m in all_imports_pattern.finditer(filtered_part)]
+            
+            # Only add to unfiltered_imports if the import wasn't matched by any of our patterns
+            for imp in remaining_imports:
+                should_log = True
+                for pattern in import_patterns:
+                    if re.search(pattern, imp + '\n', re.MULTILINE):
+                        should_log = False
+                        break
+                if should_log:
+                    unfiltered_imports.append(imp)
+            
+            result.append(filtered_part)
+        else:
+            result.append(part)
+    
+    # Log all unfiltered imports together if any were found
+    if unfiltered_imports and file_path:
+        print(f"Found unfiltered imports in {file_path}:")
+        for imp in unfiltered_imports:
+            print(f"  {imp}")
+    
+    return ''.join(result)
+
+def remove_jsx_comments(content: str) -> str:
+    """Remove JSX-style comments while preserving code blocks."""
+    parts = split_content_and_code_blocks(content)
+    result = []
+    
+    for part, is_code_block in parts:
+        if not is_code_block:
+            # Remove JSX comments outside code blocks
+            part = re.sub(r'{/\*.*?\*/}', '', part, flags=re.DOTALL)
+            # Clean up empty lines
+            part = re.sub(r'\n\s*\n\s*\n', '\n\n', part)
+        result.append(part)
+    
+    return ''.join(result).strip()
+
 def extract_meta_from_file(file_path: Path) -> tuple[dict, str]:
     """Extract meta information from an MDX file."""
     try:
         content = file_path.read_text(encoding='utf-8')
         
-        # First remove Next.js imports and exports
-        content = remove_nextjs_imports(content)
+        # First remove imports and exports
+        content = remove_imports(content, file_path)
         content = remove_nextjs_exports(content)
         content = remove_overview_components(content)
+        content = remove_jsx_comments(content)
         
         match = META_REGEX.search(content)
         if match:
@@ -514,8 +701,8 @@ def process_directory(in_dir: Path, out_dir: Path, platform: str):
                 output_path = out_dir / "index.md"
                 output_path.write_text(frontmatter + content, encoding='utf-8')
                 
-                if not content.strip():
-                    print(f"Warning: Empty content after processing {index_file}")
+                # if not content.strip():
+                    # print(f"Warning: Empty content after processing {index_file}")
         except Exception as e:
             print(f"Error processing {index_file}: {e}")
     
@@ -541,13 +728,13 @@ def process_single_file(mdx_path: str, platform: str):
     
     try:
         # First get the meta and raw content
-        print("\nExtracting meta and content...")
+        # print("\nExtracting meta and content...")
         meta, content = extract_meta_from_file(mdx_file)
         
-        if not meta:
-            print("Warning: No meta information found")
-        else:
-            print(f"Found meta: {json.dumps(meta, indent=2)}")
+        # if not meta:
+            # print("Warning: No meta information found")
+        # else:
+            # print(f"Found meta: {json.dumps(meta, indent=2)}")
             
         # Get workspace root for fragment processing
         workspace_root = mdx_file.parent
@@ -555,29 +742,29 @@ def process_single_file(mdx_path: str, platform: str):
             workspace_root = workspace_root.parent
         workspace_root = workspace_root.parent
         
-        print(f"\nUsing workspace root: {workspace_root}")
+        # print(f"\nUsing workspace root: {workspace_root}")
         
         # Process fragments
-        print("\nProcessing fragments...")
+        # print("\nProcessing fragments...")
         content_after_fragments = process_fragments(content, mdx_file, platform, workspace_root)
         
-        if content_after_fragments != content:
-            print("Content was modified by fragment processing")
-        else:
-            print("No changes from fragment processing")
+        # if content_after_fragments != content:
+            # print("Content was modified by fragment processing")
+        # else:
+            # print("No changes from fragment processing")
         
         # Process InlineFilter blocks
-        print("\nProcessing inline filters...")
+        # print("\nProcessing inline filters...")
         final_content = process_inline_filters(content_after_fragments, platform)
         
-        if final_content != content_after_fragments:
-            print("Content was modified by inline filter processing")
-        else:
-            print("No changes from inline filter processing")
+        # if final_content != content_after_fragments:
+            # print("Content was modified by inline filter processing")
+        # else:
+            # print("No changes from inline filter processing")
         
         # Create output path
         output_path = mdx_file.with_suffix('.md')
-        print(f"\nWriting output to: {output_path}")
+        # print(f"\nWriting output to: {output_path}")
         
         # Generate frontmatter
         frontmatter = convert_meta_to_frontmatter(meta)
@@ -585,10 +772,10 @@ def process_single_file(mdx_path: str, platform: str):
         # Write the output file
         output_path.write_text(frontmatter + final_content, encoding='utf-8')
         
-        if not final_content.strip():
-            print("Warning: Output content is empty!")
-        else:
-            print(f"Successfully wrote {len(final_content)} characters of content")
+        # if not final_content.strip():
+            # print("Warning: Output content is empty!")
+        # else:
+            # print(f"Successfully wrote {len(final_content)} characters of content")
             
     except Exception as e:
         print(f"Error processing file: {e}")
