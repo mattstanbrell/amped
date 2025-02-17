@@ -649,8 +649,9 @@ def remove_imports(content: str, file_path: Path | None = None) -> str:
         r'^import\s*{\s*getCustomStaticPath\s*}\s*from\s*[\'"]@/utils/getCustomStaticPath[\'"];\s*\n?',
         r'^import\s*{\s*getChildPageNodes\s*}\s*from\s*[\'"]@/utils/getChildPageNodes[\'"];\s*\n?',
         r'^import\s*{\s*getApiStaticPath\s*}\s*from\s*[\'"]@/utils/getApiStaticPath[\'"];\s*\n?',
-        # Specific schema imports
-        r'^import\s+\w+\s+from\s+[\'"].*?amplify-outputs-schema-v1\.json[\'"];\s*\n?',
+        # Schema imports - updated to handle both formats with optional semicolon
+        r'^import\s+\w+\s+from\s+[\'"].*?amplify-outputs-schema-v1\.json[\'"];?\s*\n?',
+        r'^import\s+schema\s+from\s+[\'"]\.?/.*?amplify-outputs-schema-v1\.json[\'"];?\s*\n?',
         # All imports from Icons directory
         r'^import\s*{[^}]+}\s*from\s*[\'"]@/components/Icons/[^\'"]+[\'"];?\s*$\n?',
         # AWS Amplify UI and AI imports - handle all variations with flexible whitespace
@@ -727,7 +728,10 @@ def extract_meta_from_file(file_path: Path) -> tuple[dict, str]:
     try:
         content = file_path.read_text(encoding='utf-8')
         
-        # First remove imports and exports
+        # First embed any schemas - do this BEFORE removing imports
+        content = embed_schema(content, file_path)
+        
+        # Then remove imports and exports
         content = remove_imports(content, file_path)
         content = remove_nextjs_exports(content)
         content = remove_overview_components(content)
