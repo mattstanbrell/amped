@@ -286,8 +286,51 @@ def remove_overview_components(content: str) -> str:
         flags=re.IGNORECASE | re.MULTILINE
     )
 
+def embed_schema(content: str, file_path: Path) -> str:
+    """Embed JSON schema from an imported file into the markdown content."""
+    # Find schema imports
+    schema_import_pattern = re.compile(r'import\s+(\w+)\s+from\s+[\'"]([^\'\"]+\.json)[\'"]')
+    matches = schema_import_pattern.finditer(content)
+    
+    for match in matches:
+        var_name = match.group(1)
+        schema_path = match.group(2)
+        
+        # Resolve the schema path relative to the file
+        schema_file = file_path.parent / schema_path
+        if not schema_file.exists():
+            print(f"Warning: Schema file not found: {schema_file}")
+            continue
+            
+        try:
+            # Read and parse the schema
+            schema_content = schema_file.read_text(encoding='utf-8')
+            schema_json = json.loads(schema_content)
+            formatted_schema = json.dumps(schema_json, indent=2)
+            
+            # Create markdown code block
+            schema_block = f"```json\n{formatted_schema}\n```"
+            
+            # Replace the JSX-style schema embedding with markdown
+            content = re.sub(
+                r'<pre><code[^>]*>\s*{JSON\.stringify\(' + var_name + r'[^}]+}\s*</code></pre>',
+                schema_block,
+                content
+            )
+            
+            # Remove the schema import
+            content = re.sub(r'import\s+' + var_name + r'\s+from\s+[\'"]' + re.escape(schema_path) + r'[\'"];\s*\n?', '', content)
+            
+        except Exception as e:
+            print(f"Error processing schema file {schema_file}: {e}")
+            
+    return content
+
 def process_fragments(content: str, file_path: Path, platform: str, workspace_root: Path) -> str:
     """Process fragment imports and components in MDX content."""
+    # First embed any JSON schemas
+    content = embed_schema(content, file_path)
+    
     # Track imported fragments
     fragment_imports = {}
     
