@@ -3,6 +3,8 @@ import re
 import json
 from pathlib import Path
 import yaml
+from bs4 import BeautifulSoup
+import ast
 
 # List of supported platforms
 PLATFORMS = ["angular", "javascript", "nextjs", "react", 
@@ -100,6 +102,104 @@ def remove_nextjs_exports(content: str) -> str:
     
     return result
 
+def process_inline_filters(content: str, current_platform: str) -> str:
+    """Process InlineFilter blocks in MDX content using regex."""
+    def find_matching_filter_end(text: str, start: int) -> int:
+        """Find the matching closing InlineFilter tag, handling nested filters."""
+        stack = []
+        i = start
+        in_quotes = False
+        quote_char = None
+        
+        # Push the initial opening tag onto the stack
+        stack.append(start)
+        
+        while i < len(text):
+            # Skip over quoted sections
+            if text[i] in ['"', "'"] and (i == 0 or text[i-1] != '\\'):
+                if not in_quotes:
+                    in_quotes = True
+                    quote_char = text[i]
+                elif text[i] == quote_char:
+                    in_quotes = False
+                    quote_char = None
+            
+            if not in_quotes:
+                # Look for opening tags
+                if i + len('<inlinefilter') <= len(text):
+                    next_chunk = text[i:i+len('<inlinefilter')].lower()
+                    if next_chunk == '<inlinefilter':
+                        stack.append(i)
+                        i += len('<inlinefilter') - 1
+                
+                # Look for closing tags
+                elif i + len('</inlinefilter>') <= len(text):
+                    next_chunk = text[i:i+len('</inlinefilter>')].lower()
+                    if next_chunk == '</inlinefilter':
+                        stack.pop()
+                        if not stack:  # Found the matching end tag
+                            return i
+                        i += len('</inlinefilter') - 1
+            
+            i += 1
+        return -1
+
+    # Pattern to find InlineFilter tags with more flexible matching
+    pattern = re.compile(
+        r'<inlinefilter(?:\s+filters\s*=\s*(?:{|\')?\s*\[([\s\S]*?)\]\s*(?:}|\')?)?\s*>',
+        re.IGNORECASE | re.DOTALL
+    )
+    
+    last_end = 0
+    result = []
+    
+    while True:
+        # Find next InlineFilter start
+        match = pattern.search(content, last_end)
+        if not match:
+            break
+            
+        start_pos = match.start()
+        tag_end = match.end()
+        
+        # Add content up to this tag
+        result.append(content[last_end:start_pos])
+        
+        # Extract and parse the platforms
+        platforms = []
+        if match.group(1):  # If we have a filters attribute
+            platforms_str = match.group(1)
+            # Use regex to find all quoted strings, handling both single and double quotes
+            # This will work even with newlines between array items
+            platforms = re.findall(r'["\']([^"\']+)["\']', platforms_str)
+        
+        # Find the matching closing tag, handling nested filters
+        closing_pos = find_matching_filter_end(content, start_pos)
+        
+        if closing_pos != -1:
+            # If no platforms specified (empty filter) or current platform matches, process the content
+            if not platforms or current_platform in platforms:
+                # Recursively process any nested filters in this block
+                inner_content = content[tag_end:closing_pos]
+                processed_content = process_inline_filters(inner_content, current_platform)
+                result.append(processed_content)
+            # Skip past the closing tag and its '>'
+            last_end = closing_pos + len('>')
+        else:
+            # If no closing tag found, just move past the opening tag
+            last_end = tag_end
+    
+    # Add remaining content
+    result.append(content[last_end:])
+    
+    # Join and clean up
+    result = ''.join(result)
+    # Clean up any remaining closing tags (in case of unmatched ones)
+    result = re.sub(r'</inlinefilter>\s*', '', result, flags=re.IGNORECASE)
+    result = re.sub(r'\n\s*\n\s*\n', '\n\n', result)
+    
+    return result.strip()
+
 def extract_meta_from_file(file_path: Path) -> tuple[dict, str]:
     """Extract meta information from an MDX file."""
     try:
@@ -188,6 +288,9 @@ def process_directory(in_dir: Path, out_dir: Path, platform: str):
         # Process the index file
         meta, content = extract_meta_from_file(index_file)
         if meta:
+            # Process InlineFilter blocks
+            content = process_inline_filters(content, platform)
+            
             # Create output directory
             out_dir.mkdir(parents=True, exist_ok=True)
             # Generate frontmatter and write to output file
