@@ -411,110 +411,120 @@ def convert_ui_table_to_markdown(content: str) -> str:
 
 def convert_cards_to_markdown(content: str) -> str:
     """Convert Card components to markdown format with frontmatter."""
-    # First remove the Card import
-    content = re.sub(
-        r'import\s*{\s*Card\s*}\s*from\s*[\'"]@aws-amplify/ui-react[\'"];\s*\n?',
-        '',
-        content,
-        flags=re.MULTILINE
-    )
-    
-    # Handle column layouts first (outer wrapper)
-    columns_pattern = re.compile(
-        r'<Columns\s+columns=\{(\d+)\}>\s*([\s\S]*?)\s*</Columns>',
+    # First check if we're inside an AIConversation component
+    ai_conversation_pattern = re.compile(
+        r'<AIConversation[^>]*>.*?</AIConversation>',
         re.DOTALL
     )
     
-    def process_columns(match: str) -> str:
-        print("\nProcessing Columns component:")
-        print("-" * 40)
-        columns_content = match.group(2).strip()
+    # Split content into AIConversation and non-AIConversation parts
+    parts = []
+    last_end = 0
+    
+    for match in ai_conversation_pattern.finditer(content):
+        # Add non-AIConversation content before this match
+        if match.start() > last_end:
+            parts.append((content[last_end:match.start()], False))
         
-        # Process any cards within the columns
-        card_pattern = re.compile(
-            r'<Card\s+variation="outlined">\s*([\s\S]*?)\s*</Card>',
-            re.DOTALL
-        )
-        
-        def process_card(card_match: str) -> str:
-            print("\nProcessing Card within Columns:")
-            print("-" * 40)
-            card_content = card_match.group(1).strip()
+        # Add AIConversation content
+        parts.append((match.group(0), True))
+        last_end = match.end()
+    
+    # Add remaining content
+    if last_end < len(content):
+        parts.append((content[last_end:], False))
+    
+    # Process each part
+    result = []
+    for part_content, is_ai_conversation in parts:
+        if is_ai_conversation:
+            # Preserve AIConversation content as is
+            result.append(part_content)
+        else:
+            # Process cards in non-AIConversation content
+            processed = part_content
             
-            # Check for link pattern (Simple Link Cards)
-            link_pattern = re.compile(r'\[(.*?)\]\((.*?)\)([\s\S]*)', re.DOTALL)
-            link_match = link_pattern.search(card_content)
+            # Remove the Card import
+            processed = re.sub(
+                r'import\s*{\s*Card\s*}\s*from\s*[\'"]@aws-amplify/ui-react[\'"];\s*\n?',
+                '',
+                processed,
+                flags=re.MULTILINE
+            )
             
-            if link_match:
-                title = link_match.group(1).strip()
-                link = link_match.group(2).strip()
-                description = link_match.group(3).strip()
-                result = f"> [{title}]({link})\n>\n> {description}"
-                print("Converting link card:")
-                print("Title:", title)
-                print("Link:", link)
-                print("Description:", description)
-                print("Result:", result)
-                return result
+            # Handle column layouts first (outer wrapper)
+            columns_pattern = re.compile(
+                r'<Columns\s+columns=\{(\d+)\}>\s*([\s\S]*?)\s*</Columns>',
+                re.DOTALL
+            )
             
-            # If no pattern matches, preserve as is
-            print("No specific pattern found, preserving content as is")
-            result = f"> {card_content}"
-            return result
-        
-        processed_content = card_pattern.sub(lambda m: process_card(m), columns_content)
-        return processed_content
+            def process_columns(match: str) -> str:
+                columns_content = match.group(2).strip()
+                
+                # Process any cards within the columns
+                card_pattern = re.compile(
+                    r'<Card\s+variation="outlined">\s*([\s\S]*?)\s*</Card>',
+                    re.DOTALL
+                )
+                
+                def process_card(card_match: str) -> str:
+                    card_content = card_match.group(1).strip()
+                    
+                    # Check for link pattern (Simple Link Cards)
+                    link_pattern = re.compile(r'\[(.*?)\]\((.*?)\)([\s\S]*)', re.DOTALL)
+                    link_match = link_pattern.search(card_content)
+                    
+                    if link_match:
+                        title = link_match.group(1).strip()
+                        link = link_match.group(2).strip()
+                        description = link_match.group(3).strip()
+                        return f"> [{title}]({link})\n>\n> {description}"
+                    
+                    # If no pattern matches, preserve as is
+                    return f"> {card_content}"
+                
+                processed_content = card_pattern.sub(lambda m: process_card(m), columns_content)
+                return processed_content
+            
+            # Process columns first
+            processed = columns_pattern.sub(process_columns, processed)
+            
+            # Then process any remaining cards outside columns
+            card_pattern = re.compile(
+                r'<Card\s+variation="outlined">\s*([\s\S]*?)\s*</Card>',
+                re.DOTALL
+            )
+            
+            def process_remaining_card(match: str) -> str:
+                card_content = match.group(1).strip()
+                
+                # Check for Feature Cards pattern
+                feature_pattern = re.compile(
+                    r'<Flex[^>]*>\s*<Heading[^>]*>(.*?)</Heading>\s*<Text>(.*?)</Text>\s*</Flex>',
+                    re.DOTALL
+                )
+                feature_match = feature_pattern.search(card_content)
+                
+                if feature_match:
+                    title = feature_match.group(1).strip()
+                    description = feature_match.group(2).strip()
+                    return f"> ### {title}\n>\n> {description}"
+                
+                # Check for Welcome Message Cards
+                text_pattern = re.compile(r'<Text>(.*?)</Text>', re.DOTALL)
+                text_match = text_pattern.search(card_content)
+                
+                if text_match:
+                    content = text_match.group(1).strip()
+                    return f"> {content}"
+                
+                # If no pattern matches, preserve as is
+                return f"> {card_content}"
+            
+            processed = card_pattern.sub(process_remaining_card, processed)
+            result.append(processed)
     
-    # Process columns first
-    content = columns_pattern.sub(process_columns, content)
-    
-    # Then process any remaining cards outside columns
-    card_pattern = re.compile(
-        r'<Card\s+variation="outlined">\s*([\s\S]*?)\s*</Card>',
-        re.DOTALL
-    )
-    
-    def process_remaining_card(match: str) -> str:
-        print("\nProcessing standalone Card:")
-        print("-" * 40)
-        card_content = match.group(1).strip()
-        
-        # Check for Feature Cards pattern
-        feature_pattern = re.compile(
-            r'<Flex[^>]*>\s*<Heading[^>]*>(.*?)</Heading>\s*<Text>(.*?)</Text>\s*</Flex>',
-            re.DOTALL
-        )
-        feature_match = feature_pattern.search(card_content)
-        
-        if feature_match:
-            title = feature_match.group(1).strip()
-            description = feature_match.group(2).strip()
-            result = f"> ### {title}\n>\n> {description}"
-            print("Converting feature card:")
-            print("Title:", title)
-            print("Description:", description)
-            print("Result:", result)
-            return result
-        
-        # Check for Welcome Message Cards
-        text_pattern = re.compile(r'<Text>(.*?)</Text>', re.DOTALL)
-        text_match = text_pattern.search(card_content)
-        
-        if text_match:
-            content = text_match.group(1).strip()
-            result = f"> {content}"
-            print("Converting text card:")
-            print("Content:", content)
-            print("Result:", result)
-            return result
-        
-        # If no pattern matches, preserve as is
-        print("No specific pattern found, preserving content as is")
-        result = f"> {card_content}"
-        return result
-    
-    content = card_pattern.sub(process_remaining_card, content)
-    return content
+    return ''.join(result)
 
 def process_fragments(content: str, file_path: Path, platform: str, workspace_root: Path) -> str:
     """Process fragment imports and components in MDX content."""
@@ -638,10 +648,21 @@ def remove_imports(content: str, file_path: Path | None = None) -> str:
         # Next.js specific imports
         r'^import\s*{\s*getCustomStaticPath\s*}\s*from\s*[\'"]@/utils/getCustomStaticPath[\'"];\s*\n?',
         r'^import\s*{\s*getChildPageNodes\s*}\s*from\s*[\'"]@/utils/getChildPageNodes[\'"];\s*\n?',
+        r'^import\s*{\s*getApiStaticPath\s*}\s*from\s*[\'"]@/utils/getApiStaticPath[\'"];\s*\n?',
         # Specific schema imports
         r'^import\s+\w+\s+from\s+[\'"].*?amplify-outputs-schema-v1\.json[\'"];\s*\n?',
         # All imports from Icons directory
-        r'^import\s*{[^}]+}\s*from\s*[\'"]@/components/Icons/[^\'"]+[\'"];?\s*$\n?'
+        r'^import\s*{[^}]+}\s*from\s*[\'"]@/components/Icons/[^\'"]+[\'"];?\s*$\n?',
+        # AWS Amplify UI and AI imports - handle all variations with flexible whitespace
+        r'^import\s*.*?\s*from\s*[\'"]@aws-amplify/ui-react[\'"].*?\n',
+        r'^import\s*.*?\s*from\s*[\'"]@aws-amplify/ui-react-ai[\'"].*?\n',
+        r'^import\s*.*?\s*from\s*[\'"]@/components/AI[^\'"]*[\'"].*?\n',
+        # UI Wrapper imports
+        r'^import\s*.*?\s*from\s*[\'"]@/components/UIWrapper[\'"].*?\n',
+        # Fragment imports
+        r'^import\s+[a-zA-Z0-9_]+\s+from\s*[\'"](?:/)?src/fragments/.*?[\'"].*?\n',
+        # Protected redaction message imports - updated pattern
+        r'^import\s*{\s*ProtectedRedactionGen[12]Message\s*}\s*from\s*[\'"]@/protected/ProtectedRedactionMessage[\'"].*?\n'
     ]
     
     # Pattern to find all imports for logging
@@ -679,7 +700,8 @@ def remove_imports(content: str, file_path: Path | None = None) -> str:
     
     # Log all unfiltered imports together if any were found
     if unfiltered_imports and file_path:
-        print(f"Found unfiltered imports in {file_path}:")
+        print(f"\nFile: {file_path}")
+        print("Unfiltered imports:")
         for imp in unfiltered_imports:
             print(f"  {imp}")
     
@@ -833,18 +855,10 @@ def process_single_file(mdx_path: str, platform: str):
     if not mdx_file.exists():
         print(f"Error: File {mdx_path} does not exist!")
         return
-
-    print(f"\nProcessing {mdx_file} for platform: {platform}")
     
     try:
-        # First get the meta and raw content
-        # print("\nExtracting meta and content...")
+        # Get meta and raw content
         meta, content = extract_meta_from_file(mdx_file)
-        
-        # if not meta:
-            # print("Warning: No meta information found")
-        # else:
-            # print(f"Found meta: {json.dumps(meta, indent=2)}")
             
         # Get workspace root for fragment processing
         workspace_root = mdx_file.parent
@@ -852,40 +866,17 @@ def process_single_file(mdx_path: str, platform: str):
             workspace_root = workspace_root.parent
         workspace_root = workspace_root.parent
         
-        # print(f"\nUsing workspace root: {workspace_root}")
-        
-        # Process fragments
-        # print("\nProcessing fragments...")
-        content_after_fragments = process_fragments(content, mdx_file, platform, workspace_root)
-        
-        # if content_after_fragments != content:
-            # print("Content was modified by fragment processing")
-        # else:
-            # print("No changes from fragment processing")
-        
-        # Process InlineFilter blocks
-        # print("\nProcessing inline filters...")
-        final_content = process_inline_filters(content_after_fragments, platform)
-        
-        # if final_content != content_after_fragments:
-            # print("Content was modified by inline filter processing")
-        # else:
-            # print("No changes from inline filter processing")
+        # Process fragments with the current platform
+        processed_content = process_fragments(content, mdx_file, platform, workspace_root)
         
         # Create output path
         output_path = mdx_file.with_suffix('.md')
-        # print(f"\nWriting output to: {output_path}")
         
         # Generate frontmatter
         frontmatter = convert_meta_to_frontmatter(meta)
         
         # Write the output file
-        output_path.write_text(frontmatter + final_content, encoding='utf-8')
-        
-        # if not final_content.strip():
-            # print("Warning: Output content is empty!")
-        # else:
-            # print(f"Successfully wrote {len(final_content)} characters of content")
+        output_path.write_text(frontmatter + processed_content, encoding='utf-8')
             
     except Exception as e:
         print(f"Error processing file: {e}")
@@ -899,57 +890,7 @@ def main():
     if len(sys.argv) == 3:
         mdx_path = sys.argv[1]
         platform = sys.argv[2]
-        
-        try:
-            print(f"\nProcessing file: {mdx_path}")
-            print(f"Platform: {platform}")
-            print("=" * 60)
-            
-            # Read the file content
-            with open(mdx_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                
-            print("\nOriginal content snippet around Card/Column components:")
-            # Find and show context around Card and Column components
-            card_positions = [(m.start(), m.end()) for m in re.finditer(r'<Card.*?</Card>', content, re.DOTALL)]
-            column_positions = [(m.start(), m.end()) for m in re.finditer(r'<Columns.*?</Columns>', content, re.DOTALL)]
-            
-            all_positions = sorted(card_positions + column_positions)
-            for start, end in all_positions:
-                context_start = max(0, start - 50)
-                context_end = min(len(content), end + 50)
-                print("\nContext (... indicates truncated content):")
-                print("..." if context_start > 0 else "", end="")
-                print(content[context_start:context_end], end="")
-                print("..." if context_end < len(content) else "")
-                print("-" * 60)
-            
-            # Process the file
-            file_path = Path(mdx_path)
-            workspace_root = file_path.parent
-            while workspace_root.name != "src" and workspace_root.parent != workspace_root:
-                workspace_root = workspace_root.parent
-            workspace_root = workspace_root.parent
-            
-            # Extract meta and process content
-            meta, processed_content = extract_meta_from_file(file_path)
-            
-            # Process fragments with the current platform
-            processed_content = process_fragments(processed_content, file_path, platform, workspace_root)
-            
-            # Create output path
-            output_path = file_path.with_suffix('.md')
-            print(f"\nWriting converted content to: {output_path}")
-            
-            # Write the output file
-            output_path.write_text(processed_content, encoding='utf-8')
-            
-            print("\nProcessing complete!")
-            
-        except Exception as e:
-            print(f"Error processing file: {e}")
-            import traceback
-            traceback.print_exc()
+        process_single_file(mdx_path, platform)
             
     # Original directory processing mode
     else:
@@ -967,8 +908,7 @@ def main():
             return
             
         for platform in PLATFORMS:
-            print(f"\nProcessing platform: {platform}")
-            print("=" * 60)
+            print(f"Processing platform: {platform}")
             
             # Create output directory for this platform
             out_dir = Path(f"llms-docs/{platform}")
@@ -976,9 +916,7 @@ def main():
             # Process the directory tree
             process_directory(src_dir, out_dir, platform)
             
-            print(f"Completed processing for {platform}")
-            
-        print("\nAll platforms processed successfully!")
+        print("Processing complete")
 
 if __name__ == "__main__":
     main() 
