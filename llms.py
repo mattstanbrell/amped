@@ -102,100 +102,177 @@ def remove_nextjs_exports(content: str) -> str:
     
     return result
 
+def find_matching_filter_end(text: str, start: int) -> int:
+    """Find the matching closing InlineFilter tag, handling nested filters."""
+    stack = []
+    i = start
+    in_quotes = False
+    quote_char = None
+    
+    # Push the initial opening tag onto the stack
+    stack.append(start)
+    
+    while i < len(text):
+        # Skip over quoted sections
+        if text[i] in ['"', "'"] and (i == 0 or text[i-1] != '\\'):
+            if not in_quotes:
+                in_quotes = True
+                quote_char = text[i]
+            elif text[i] == quote_char:
+                in_quotes = False
+                quote_char = None
+        
+        if not in_quotes:
+            # Look for opening tags
+            if i + len('<inlinefilter') <= len(text):
+                next_chunk = text[i:i+len('<inlinefilter')].lower()
+                if next_chunk == '<inlinefilter':
+                    stack.append(i)
+                    i += len('<inlinefilter') - 1
+            
+            # Look for closing tags
+            elif i + len('</inlinefilter>') <= len(text):
+                next_chunk = text[i:i+len('</inlinefilter>')].lower()
+                if next_chunk == '</inlinefilter':
+                    stack.pop()
+                    if not stack:  # Found the matching end tag
+                        return i
+                    i += len('</inlinefilter') - 1
+        
+        i += 1
+        
+        # Debug output for tag matching
+        if i % 1000 == 0:  # Print every 1000 characters to avoid spam
+            print(f"Current position: {i}, Stack depth: {len(stack)}")
+            print(f"Next 20 chars: {text[i:i+20]}")
+    
+    # If we get here, we didn't find a matching end tag
+    print(f"Failed to find closing tag. Stack depth: {len(stack)}")
+    if stack:
+        context_start = max(0, stack[-1] - 50)
+        context_end = min(len(text), stack[-1] + 50)
+        print(f"Context around last opening tag:\n{text[context_start:context_end]}")
+    
+    return -1
+
 def process_inline_filters(content: str, current_platform: str) -> str:
     """Process InlineFilter blocks in MDX content using regex."""
-    def find_matching_filter_end(text: str, start: int) -> int:
-        """Find the matching closing InlineFilter tag, handling nested filters."""
-        stack = []
-        i = start
-        in_quotes = False
-        quote_char = None
+    print(f"\nProcessing inline filters for platform: {current_platform}")
+    
+    def find_matching_end(text: str, start: int) -> int:
+        """Find the matching closing InlineFilter tag, handling nested tags."""
+        count = 1  # We start after an opening tag
+        pos = start
         
-        # Push the initial opening tag onto the stack
-        stack.append(start)
-        
-        while i < len(text):
-            # Skip over quoted sections
-            if text[i] in ['"', "'"] and (i == 0 or text[i-1] != '\\'):
-                if not in_quotes:
-                    in_quotes = True
-                    quote_char = text[i]
-                elif text[i] == quote_char:
-                    in_quotes = False
-                    quote_char = None
+        while count > 0 and pos < len(text):
+            # Find next opening or closing tag (case insensitive)
+            open_tag = -1
+            close_tag = -1
             
-            if not in_quotes:
-                # Look for opening tags
-                if i + len('<inlinefilter') <= len(text):
-                    next_chunk = text[i:i+len('<inlinefilter')].lower()
-                    if next_chunk == '<inlinefilter':
-                        stack.append(i)
-                        i += len('<inlinefilter') - 1
+            # Look for next tags after current position
+            text_lower = text.lower()
+            temp_pos = pos
+            while temp_pos < len(text):
+                next_open = text_lower.find('<inlinefilter', temp_pos)
+                next_close = text_lower.find('</inlinefilter>', temp_pos)
                 
-                # Look for closing tags
-                elif i + len('</inlinefilter>') <= len(text):
-                    next_chunk = text[i:i+len('</inlinefilter>')].lower()
-                    if next_chunk == '</inlinefilter':
-                        stack.pop()
-                        if not stack:  # Found the matching end tag
-                            return i
-                        i += len('</inlinefilter') - 1
+                if next_open == -1 and next_close == -1:
+                    break
+                    
+                if next_open != -1 and (next_close == -1 or next_open < next_close):
+                    open_tag = next_open
+                    temp_pos = next_open + len('<inlinefilter')
+                    break
+                    
+                if next_close != -1:
+                    close_tag = next_close
+                    temp_pos = next_close + len('</inlinefilter>')
+                    break
             
-            i += 1
-        return -1
-
-    # Pattern to find InlineFilter tags with more flexible matching
-    pattern = re.compile(
-        r'<inlinefilter(?:\s+filters\s*=\s*(?:{|\')?\s*\[([\s\S]*?)\]\s*(?:}|\')?)?\s*>',
-        re.IGNORECASE | re.DOTALL
-    )
+            # No more tags found
+            if open_tag == -1 and close_tag == -1:
+                return -1
+                
+            # Found a closing tag first
+            if (close_tag != -1 and open_tag == -1) or (close_tag != -1 and close_tag < open_tag):
+                count -= 1
+                pos = close_tag + len('</inlinefilter>')
+            # Found an opening tag first
+            elif open_tag != -1:
+                count += 1
+                pos = open_tag + len('<inlinefilter')
+        
+        return pos if count == 0 else -1
     
-    last_end = 0
-    result = []
-    
-    while True:
-        # Find next InlineFilter start
-        match = pattern.search(content, last_end)
-        if not match:
-            break
+    def process_recursive(text: str, depth: int = 0) -> str:
+        indent = "  " * depth
+        print(f"{indent}Processing at depth {depth}")
+        
+        result = []
+        pos = 0
+        
+        while pos < len(text):
+            # Find next InlineFilter start (case insensitive)
+            start_tag = text.lower().find('<inlinefilter', pos)
+            if start_tag == -1:
+                # No more filters, add remaining content
+                result.append(text[pos:])
+                break
             
-        start_pos = match.start()
-        tag_end = match.end()
-        
-        # Add content up to this tag
-        result.append(content[last_end:start_pos])
-        
-        # Extract and parse the platforms
-        platforms = []
-        if match.group(1):  # If we have a filters attribute
-            platforms_str = match.group(1)
-            # Use regex to find all quoted strings, handling both single and double quotes
-            # This will work even with newlines between array items
-            platforms = re.findall(r'["\']([^"\']+)["\']', platforms_str)
-        
-        # Find the matching closing tag, handling nested filters
-        closing_pos = find_matching_filter_end(content, start_pos)
-        
-        if closing_pos != -1:
-            # If no platforms specified (empty filter) or current platform matches, process the content
-            if not platforms or current_platform in platforms:
-                # Recursively process any nested filters in this block
-                inner_content = content[tag_end:closing_pos]
-                processed_content = process_inline_filters(inner_content, current_platform)
+            # Add content up to the tag
+            result.append(text[pos:start_tag])
+            
+            # Find the filters attribute
+            filters_start = text.lower().find('filters=', start_tag)
+            if filters_start == -1:
+                pos = start_tag + 1
+                continue
+                
+            # Find the end of the opening tag
+            tag_end = text.find('>', filters_start)
+            if tag_end == -1:
+                pos = start_tag + 1
+                continue
+                
+            # Extract platforms string
+            platforms_str = text[filters_start:tag_end]
+            platforms = re.findall(r'["\']([a-zA-Z0-9-]+)["\']', platforms_str)
+            print(f"{indent}Found InlineFilter with platforms: {platforms}")
+            
+            # Find the matching end tag
+            content_start = tag_end + 1
+            content_end = find_matching_end(text, content_start)
+            
+            if content_end == -1:
+                print(f"{indent}Warning: No matching end tag found")
+                pos = start_tag + 1
+                continue
+            
+            # Get the content between tags
+            inner_content = text[content_start:content_end - len('</inlinefilter>')]
+            
+            # Include content if either:
+            # 1. No platforms specified (empty filter) - include for all platforms
+            # 2. Current platform is in the specified platforms list
+            should_include = not platforms or current_platform in platforms
+            
+            if should_include:
+                print(f"{indent}Including content for {current_platform}")
+                # Recursively process any nested filters
+                processed_content = process_recursive(inner_content, depth + 1)
                 result.append(processed_content)
-            # Skip past the closing tag and its '>'
-            last_end = closing_pos + len('>')
-        else:
-            # If no closing tag found, just move past the opening tag
-            last_end = tag_end
+            else:
+                print(f"{indent}Excluding content for {current_platform} (not in {platforms})")
+            
+            # Move past this entire block
+            pos = content_end
+        
+        return ''.join(result).strip()
     
-    # Add remaining content
-    result.append(content[last_end:])
+    # Process the content recursively
+    result = process_recursive(content)
     
-    # Join and clean up
-    result = ''.join(result)
-    # Clean up any remaining closing tags (in case of unmatched ones)
-    result = re.sub(r'</inlinefilter>\s*', '', result, flags=re.IGNORECASE)
+    # Clean up multiple empty lines
     result = re.sub(r'\n\s*\n\s*\n', '\n\n', result)
     
     return result.strip()
@@ -401,24 +478,94 @@ def process_directory(in_dir: Path, out_dir: Path, platform: str):
                 out_subdir = out_dir / item.name
             process_directory(item, out_subdir, platform)
 
-def main():
-    # Get the script's directory
-    script_dir = Path(__file__).parent
-    # Get the workspace root (one level up from script directory)
-    workspace_root = script_dir.parent
-    
-    src_root = workspace_root / "src/pages"
-    dest_root = workspace_root / "llms-docs"
-    
-    if not src_root.exists():
-        print(f"Source directory {src_root} does not exist!")
+def process_single_file(mdx_path: str, platform: str):
+    """Process a single MDX file and output the corresponding MD file."""
+    mdx_file = Path(mdx_path)
+    if not mdx_file.exists():
+        print(f"Error: File {mdx_path} does not exist!")
         return
+
+    print(f"\nProcessing {mdx_file} for platform: {platform}")
     
-    # Create the output root directory
-    dest_root.mkdir(exist_ok=True)
-    
-    for platform in PLATFORMS:
-        process_directory(src_root, dest_root / platform, platform)
+    try:
+        # First get the meta and raw content
+        print("\nExtracting meta and content...")
+        meta, content = extract_meta_from_file(mdx_file)
+        
+        if not meta:
+            print("Warning: No meta information found")
+        else:
+            print(f"Found meta: {json.dumps(meta, indent=2)}")
+            
+        # Get workspace root for fragment processing
+        workspace_root = mdx_file.parent
+        while workspace_root.name != "src" and workspace_root.parent != workspace_root:
+            workspace_root = workspace_root.parent
+        workspace_root = workspace_root.parent
+        
+        print(f"\nUsing workspace root: {workspace_root}")
+        
+        # Process fragments
+        print("\nProcessing fragments...")
+        content_after_fragments = process_fragments(content, mdx_file, platform, workspace_root)
+        
+        if content_after_fragments != content:
+            print("Content was modified by fragment processing")
+        else:
+            print("No changes from fragment processing")
+        
+        # Process InlineFilter blocks
+        print("\nProcessing inline filters...")
+        final_content = process_inline_filters(content_after_fragments, platform)
+        
+        if final_content != content_after_fragments:
+            print("Content was modified by inline filter processing")
+        else:
+            print("No changes from inline filter processing")
+        
+        # Create output path
+        output_path = mdx_file.with_suffix('.md')
+        print(f"\nWriting output to: {output_path}")
+        
+        # Generate frontmatter
+        frontmatter = convert_meta_to_frontmatter(meta)
+        
+        # Write the output file
+        output_path.write_text(frontmatter + final_content, encoding='utf-8')
+        
+        if not final_content.strip():
+            print("Warning: Output content is empty!")
+        else:
+            print(f"Successfully wrote {len(final_content)} characters of content")
+            
+    except Exception as e:
+        print(f"Error processing file: {e}")
+        import traceback
+        traceback.print_exc()
+
+def main():
+    import sys
+    if len(sys.argv) > 2:
+        # Process single file mode
+        mdx_path = sys.argv[1]
+        platform = sys.argv[2]
+        process_single_file(mdx_path, platform)
+    else:
+        # Original directory processing mode
+        script_dir = Path(__file__).parent
+        workspace_root = script_dir.parent
+        
+        src_root = workspace_root / "src/pages"
+        dest_root = workspace_root / "llms-docs"
+        
+        if not src_root.exists():
+            print(f"Source directory {src_root} does not exist!")
+            return
+        
+        dest_root.mkdir(exist_ok=True)
+        
+        for platform in PLATFORMS:
+            process_directory(src_root, dest_root / platform, platform)
 
 if __name__ == "__main__":
     main() 
