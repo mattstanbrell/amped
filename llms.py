@@ -335,7 +335,7 @@ def convert_meta_to_frontmatter(meta: dict) -> str:
     try:
         # Convert to YAML, preserving order
         yaml_str = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
-        return f"---\n{yaml_str}---\n"
+        return f"---\n{yaml_str}---\n\n"
     except Exception as e:
         print(f"Error converting meta to YAML: {e}")
         return ""
