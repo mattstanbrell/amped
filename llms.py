@@ -209,6 +209,72 @@ def remove_overview_components(content: str) -> str:
         flags=re.IGNORECASE | re.MULTILINE
     )
 
+def process_fragments(content: str, file_path: Path, platform: str, workspace_root: Path) -> str:
+    """Process fragment imports and components in MDX content."""
+    # Track imported fragments
+    fragment_imports = {}
+    
+    # Extract and remove imports
+    import_pattern = re.compile(
+        r'^import\s+([a-zA-Z0-9_]+)\s+from\s+\'(/src/fragments/[^\']+)\';\s*\n?',
+        re.MULTILINE
+    )
+    
+    def import_repl(match):
+        alias = match.group(1)
+        source_path = match.group(2)
+        # Convert /src/fragments path to workspace path
+        rel_path = source_path.lstrip('/')
+        fragment_imports[alias] = workspace_root / rel_path
+        return ''  # Remove the import
+    
+    content = import_pattern.sub(import_repl, content)
+    
+    # Process Fragments components
+    fragments_pattern = re.compile(
+        r'<Fragments\s+fragments\s*=\s*({[\s\S]*?})\s*/>\s*\n?'
+    )
+    
+    def fragments_repl(match):
+        fragments_str = match.group(1)
+        
+        # Extract platform to alias mapping using regex
+        # Handle both forms: {platform: alias} and {'platform': alias}
+        mapping_pattern = re.compile(r'[\'"]?([\w-]+)[\'"]?\s*:\s*(\w+)')
+        mappings = mapping_pattern.findall(fragments_str)
+        
+        # Find the matching fragment for current platform
+        fragment_path = None
+        fragment_content = ''
+        
+        for frag_platform, alias in mappings:
+            if frag_platform == platform and alias in fragment_imports:
+                fragment_path = fragment_imports[alias]
+                break
+        
+        if fragment_path and fragment_path.exists():
+            try:
+                # Read and process the fragment file
+                fragment_content = fragment_path.read_text(encoding='utf-8')
+                # Process any nested fragments in the fragment
+                fragment_content = process_fragments(
+                    fragment_content, 
+                    fragment_path, 
+                    platform,
+                    workspace_root
+                )
+                # Process any inline filters in the fragment
+                fragment_content = process_inline_filters(fragment_content, platform)
+                return fragment_content.strip()
+            except Exception as e:
+                print(f"Warning: Error processing fragment {fragment_path}: {e}")
+                return ''
+        
+        return ''  # Remove the Fragments component if no matching content
+    
+    content = fragments_pattern.sub(fragments_repl, content)
+    return content
+
 def extract_meta_from_file(file_path: Path) -> tuple[dict, str]:
     """Extract meta information from an MDX file."""
     try:
@@ -295,18 +361,34 @@ def process_directory(in_dir: Path, out_dir: Path, platform: str):
         if dir_platforms and platform not in dir_platforms:
             return
         
-        # Process the index file
-        meta, content = extract_meta_from_file(index_file)
-        if meta:
-            # Process InlineFilter blocks
-            content = process_inline_filters(content, platform)
-            
-            # Create output directory
-            out_dir.mkdir(parents=True, exist_ok=True)
-            # Generate frontmatter and write to output file
-            frontmatter = convert_meta_to_frontmatter(meta)
-            output_path = out_dir / "index.md"
-            output_path.write_text(frontmatter + content, encoding='utf-8')
+        try:
+            # First get the meta and raw content
+            meta, content = extract_meta_from_file(index_file)
+            if meta:
+                # Get workspace root for fragment processing
+                workspace_root = index_file.parent
+                while workspace_root.name != "src" and workspace_root.parent != workspace_root:
+                    workspace_root = workspace_root.parent
+                workspace_root = workspace_root.parent
+                
+                # Process fragments with the current platform
+                content = process_fragments(content, index_file, platform, workspace_root)
+                
+                # Process InlineFilter blocks
+                content = process_inline_filters(content, platform)
+                
+                # Create output directory
+                out_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Generate frontmatter and write to output file
+                frontmatter = convert_meta_to_frontmatter(meta)
+                output_path = out_dir / "index.md"
+                output_path.write_text(frontmatter + content, encoding='utf-8')
+                
+                if not content.strip():
+                    print(f"Warning: Empty content after processing {index_file}")
+        except Exception as e:
+            print(f"Error processing {index_file}: {e}")
     
     # Process subdirectories
     for item in in_dir.iterdir():
