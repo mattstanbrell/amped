@@ -293,16 +293,19 @@ def process_fragments(content: str, file_path: Path, platform: str, workspace_ro
     
     # Extract and remove imports
     import_pattern = re.compile(
-        r'^import\s+([a-zA-Z0-9_]+)\s+from\s+\'(/src/fragments/[^\']+)\';\s*\n?',
+        r'^import\s+([a-zA-Z0-9_]+)\s+from\s+[\'"](?:/)?([^\'\"]+)[\'"]\s*;\s*\n?',
         re.MULTILINE
     )
     
     def import_repl(match):
         alias = match.group(1)
         source_path = match.group(2)
-        # Convert /src/fragments path to workspace path
-        rel_path = source_path.lstrip('/')
-        fragment_imports[alias] = workspace_root / rel_path
+        # Handle both absolute and relative paths
+        if source_path.startswith('src/'):
+            fragment_imports[alias] = workspace_root / source_path
+        else:
+            # For absolute paths starting with /, strip the leading /
+            fragment_imports[alias] = workspace_root / source_path.lstrip('/')
         return ''  # Remove the import
     
     content = import_pattern.sub(import_repl, content)
@@ -331,6 +334,7 @@ def process_fragments(content: str, file_path: Path, platform: str, workspace_ro
         
         if fragment_path and fragment_path.exists():
             try:
+                print(f"Processing fragment: {fragment_path}")
                 # Read and process the fragment file
                 fragment_content = fragment_path.read_text(encoding='utf-8')
                 # Process any nested fragments in the fragment
@@ -346,6 +350,11 @@ def process_fragments(content: str, file_path: Path, platform: str, workspace_ro
             except Exception as e:
                 print(f"Warning: Error processing fragment {fragment_path}: {e}")
                 return ''
+        else:
+            if fragment_path:
+                print(f"Warning: Fragment file not found: {fragment_path}")
+            else:
+                print(f"Warning: No matching fragment found for platform {platform}")
         
         return ''  # Remove the Fragments component if no matching content
     
