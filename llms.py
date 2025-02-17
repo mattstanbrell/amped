@@ -200,6 +200,15 @@ def process_inline_filters(content: str, current_platform: str) -> str:
     
     return result.strip()
 
+def remove_overview_components(content: str) -> str:
+    """Remove Overview component tags from the content."""
+    return re.sub(
+        r'<Overview\s+childPageNodes\s*=\s*{[^}]+}\s*/>\s*\n?',
+        '',
+        content,
+        flags=re.IGNORECASE | re.MULTILINE
+    )
+
 def extract_meta_from_file(file_path: Path) -> tuple[dict, str]:
     """Extract meta information from an MDX file."""
     try:
@@ -208,6 +217,7 @@ def extract_meta_from_file(file_path: Path) -> tuple[dict, str]:
         # First remove Next.js imports and exports
         content = remove_nextjs_imports(content)
         content = remove_nextjs_exports(content)
+        content = remove_overview_components(content)
         
         match = META_REGEX.search(content)
         if match:
