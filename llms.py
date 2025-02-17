@@ -801,8 +801,8 @@ def extract_platforms_from_file(file_path: Path) -> list[str] | None:
 
 def process_directory(in_dir: Path, out_dir: Path, platform: str):
     """Process a directory and its subdirectories."""
-    # Skip gen1 directory
-    if "gen1" in in_dir.parts:
+    # Skip gen1 and [category] directories
+    if "gen1" in in_dir.parts or "[category]" in in_dir.parts:
         return
         
     # Check index.mdx for platform filtering
