@@ -526,8 +526,28 @@ def convert_cards_to_markdown(content: str) -> str:
     
     return ''.join(result)
 
+def get_workspace_root(file_path: Path) -> Path:
+    """Find the workspace root by looking for src directory"""
+    current = file_path.resolve()  # Resolve any symlinks and get absolute path
+    while current != current.parent:  # Stop at root directory
+        if (current / "src").is_dir():  # Check if src exists and is a directory
+            return current
+        if current.name == "src" and current.parent.is_dir():  # If we're in src, return parent
+            return current.parent
+        current = current.parent
+    # If we can't find src directory, use the directory containing the file
+    return file_path.parent
+
 def process_fragments(content: str, file_path: Path, platform: str, workspace_root: Path) -> str:
     """Process fragment imports and components in MDX content."""
+    print(f"\n{'='*80}")
+    print(f"Processing fragments in {file_path}")
+    print(f"Workspace root: {workspace_root}")
+    print(f"Platform: {platform}")
+    print(f"Initial content length: {len(content)}")
+    print(f"Content preview:\n{content[:500]}...")
+    print(f"{'='*80}\n")
+
     # First embed any JSON schemas
     content = embed_schema(content, file_path)
     
@@ -537,78 +557,179 @@ def process_fragments(content: str, file_path: Path, platform: str, workspace_ro
     # Convert Cards to markdown
     content = convert_cards_to_markdown(content)
     
-    # Track imported fragments
+    # Track imported fragments - collect ALL imports first
     fragment_imports = {}
-    
-    # Extract and remove imports
     import_pattern = re.compile(
-        r'^import\s+([a-zA-Z0-9_]+)\s+from\s+[\'"](?:/)?([^\'\"]+)[\'"]\s*;\s*\n?',
-        re.MULTILINE
+        r'(?:^|\n|```.*?\n)(?:\s*)(import\s+([a-zA-Z0-9_]+)\s+from\s+[\'"](?:/)?([^\'\"]+)[\'"]\s*;\s*\n?)',
+        re.MULTILINE | re.DOTALL
     )
     
-    def import_repl(match):
-        alias = match.group(1)
-        source_path = match.group(2)
-        # Handle both absolute and relative paths
-        if source_path.startswith('src/'):
+    # First pass: collect all imports without removing them
+    for match in import_pattern.finditer(content):
+        alias = match.group(2)
+        source_path = match.group(3)
+        if source_path.startswith('/'):
+            fragment_imports[alias] = workspace_root / source_path.lstrip('/')
+        elif source_path.startswith('src/'):
             fragment_imports[alias] = workspace_root / source_path
         else:
-            # For absolute paths starting with /, strip the leading /
-            fragment_imports[alias] = workspace_root / source_path.lstrip('/')
-        return ''  # Remove the import
+            fragment_imports[alias] = file_path.parent / source_path
+        print(f"Found import: {alias} from {fragment_imports[alias]}")
     
-    content = import_pattern.sub(import_repl, content)
+    print(f"Found {len(fragment_imports)} fragment imports: {fragment_imports}")
     
-    # Process Fragments components
-    fragments_pattern = re.compile(
-        r'<Fragments\s+fragments\s*=\s*({[\s\S]*?})\s*/>\s*\n?'
-    )
+    # Split content into sections to preserve code blocks
+    sections = split_content_and_code_blocks(content)
+    print(f"\nSplit content into {len(sections)} sections")
+    for i, (section, is_code) in enumerate(sections):
+        print(f"\nSection {i+1} ({'code block' if is_code else 'non-code'}):")
+        print(f"Length: {len(section)}")
+        print(f"Preview: {section[:200]}...")
     
-    def fragments_repl(match):
-        fragments_str = match.group(1)
+    processed_sections = []
+    
+    # Process each section
+    for section_idx, (section_content, is_code_block) in enumerate(sections):
+        print(f"\nProcessing section {section_idx+1} ({'code block' if is_code_block else 'non-code'})")
         
-        # Extract platform to alias mapping using regex
-        # Handle both forms: {platform: alias} and {'platform': alias}
-        mapping_pattern = re.compile(r'[\'"]?([\w-]+)[\'"]?\s*:\s*(\w+)')
-        mappings = mapping_pattern.findall(fragments_str)
+        if is_code_block:
+            print("Preserving code block as-is")
+            processed_sections.append(section_content)
+            continue
         
-        # Find the matching fragment for current platform
-        fragment_path = None
-        fragment_content = ''
+        # Process Fragments components in non-code sections
+        fragments_pattern = re.compile(
+            r'<Fragments\s+fragments\s*=\s*({[\s\S]*?})\s*/>\s*\n?',
+            re.MULTILINE
+        )
         
-        for frag_platform, alias in mappings:
-            if frag_platform == platform and alias in fragment_imports:
-                fragment_path = fragment_imports[alias]
-                break
+        def fragments_repl(match):
+            fragments_str = match.group(1)
+            print(f"\nProcessing Fragments component with: {fragments_str}")
+            
+            # Extract platform to alias mapping using regex
+            mapping_pattern = re.compile(r'[\'"]?([\w-]+)[\'"]?\s*:\s*(\w+)')
+            mappings = mapping_pattern.findall(fragments_str)
+            print(f"Found mappings: {mappings}")
+            print(f"Current platform: {platform}")
+            print(f"Available fragment imports: {list(fragment_imports.keys())}")
+            
+            # Find the matching fragment for current platform
+            fragment_path = None
+            fragment_content = ''
+            
+            for frag_platform, alias in mappings:
+                print(f"Checking if {frag_platform} matches {platform} and if {alias} is in imports")
+                if frag_platform == platform and alias in fragment_imports:
+                    fragment_path = fragment_imports[alias]
+                    print(f"Found matching fragment: {fragment_path}")
+                    break
+            
+            if fragment_path:
+                print(f"Looking for fragment at: {fragment_path}")
+                if fragment_path.exists():
+                    print(f"Found fragment file")
+                    try:
+                        # Read and process the fragment file
+                        fragment_content = fragment_path.read_text(encoding='utf-8')
+                        print(f"\nFragment content before processing:\n{fragment_content[:500]}...")
+                        
+                        # Process any nested fragments in the fragment
+                        fragment_content = process_fragments(
+                            fragment_content, 
+                            fragment_path, 
+                            platform,
+                            workspace_root
+                        )
+                        
+                        print(f"\nFragment content after processing:\n{fragment_content[:500]}...")
+                        
+                        # Process any inline filters in the fragment
+                        fragment_content = process_inline_filters(fragment_content, platform)
+                        
+                        # Ensure proper spacing around headings
+                        # First ensure there's a newline before any heading
+                        fragment_content = re.sub(r'([^\n])\n(\#{1,6}\s+[^\n]+)', r'\1\n\n\2', fragment_content)
+                        # Then ensure there's a newline after any heading
+                        fragment_content = re.sub(r'(\#{1,6}\s+[^\n]+)\n([^\n])', r'\1\n\n\2', fragment_content)
+                        
+                        # Add newlines to ensure proper separation between fragments
+                        return "\n\n" + fragment_content.strip() + "\n\n"
+                    except Exception as e:
+                        print(f"Error processing fragment {fragment_path}: {e}")
+                        return ''
+                else:
+                    print(f"Fragment file not found at {fragment_path}")
+            else:
+                print(f"No matching fragment found for platform {platform}")
+            
+            return ''
         
-        if fragment_path and fragment_path.exists():
-            try:
-                print(f"Processing fragment: {fragment_path}")
-                # Read and process the fragment file
-                fragment_content = fragment_path.read_text(encoding='utf-8')
-                # Process any nested fragments in the fragment
-                fragment_content = process_fragments(
-                    fragment_content, 
-                    fragment_path, 
-                    platform,
-                    workspace_root
+        # Process fragments first
+        print("\nProcessing fragments in section...")
+        section_content_before = section_content
+        section_content = fragments_pattern.sub(fragments_repl, section_content)
+        if section_content != section_content_before:
+            print(f"\nSection content changed after fragment processing:")
+            print(f"Before length: {len(section_content_before)}")
+            print(f"After length: {len(section_content)}")
+            print(f"After content preview:\n{section_content[:500]}...")
+        
+        # Add the processed section if it's not empty
+        if section_content.strip():
+            processed_sections.append(section_content)
+            print(f"\nAdded processed section {section_idx+1} (length: {len(section_content)})")
+    
+    # Join sections with proper spacing and remove imports
+    result = []
+    current_section = []
+    
+    for section in processed_sections:
+        # If this is a code block (starts with ```), add it as is
+        if section.strip().startswith('```'):
+            if current_section:
+                # Process and add the current non-code section
+                non_code_content = '\n'.join(current_section)
+                # Remove imports only from non-code sections, with more precise pattern
+                non_code_content = re.sub(
+                    r'^\s*import\s+[a-zA-Z0-9_]+\s+from\s+[\'"](?:/)?[^\'\"]+[\'"]\s*;\s*\n?',
+                    '',
+                    non_code_content,
+                    flags=re.MULTILINE
                 )
-                # Process any inline filters in the fragment
-                fragment_content = process_inline_filters(fragment_content, platform)
-                return fragment_content.strip()
-            except Exception as e:
-                # print(f"Warning: Error processing fragment {fragment_path}: {e}")
-                return ''
-        # else:
-        #     if fragment_path:
-        #         # print(f"Warning: Fragment file not found: {fragment_path}")
-        #     else:
-        #         # print(f"Warning: No matching fragment found for platform {platform}")
-        
-        return ''  # Remove the Fragments component if no matching content
+                if non_code_content.strip():
+                    result.append(non_code_content.strip())
+                current_section = []
+            result.append(section.strip())
+        else:
+            # Add to current non-code section
+            if section.strip():
+                current_section.append(section.strip())
     
-    content = fragments_pattern.sub(fragments_repl, content)
-    return content
+    # Process any remaining non-code section
+    if current_section:
+        non_code_content = '\n'.join(current_section)
+        # Remove imports only from non-code sections, with more precise pattern
+        non_code_content = re.sub(
+            r'^\s*import\s+[a-zA-Z0-9_]+\s+from\s+[\'"](?:/)?[^\'\"]+[\'"]\s*;\s*\n?',
+            '',
+            non_code_content,
+            flags=re.MULTILINE
+        )
+        if non_code_content.strip():
+            result.append(non_code_content.strip())
+    
+    # Join all sections with proper spacing
+    content = '\n\n'.join(result)
+    
+    # Clean up multiple empty lines but preserve double newlines
+    content = re.sub(r'\n{3,}', '\n\n', content)
+    
+    print(f"\nFinal content length: {len(content)}")
+    print(f"Final content preview:\n{content[:500]}...")
+    print(f"\n{'='*80}\n")
+    
+    return content.strip()
 
 def split_content_and_code_blocks(content: str) -> list[tuple[str, bool]]:
     """Split content into alternating non-code and code blocks.
@@ -731,8 +852,8 @@ def extract_meta_from_file(file_path: Path) -> tuple[dict, str]:
         # First embed any schemas - do this BEFORE removing imports
         content = embed_schema(content, file_path)
         
-        # Then remove imports and exports
-        content = remove_imports(content, file_path)
+        # Remove only Next.js specific imports and exports
+        content = remove_nextjs_imports(content)  # Only removes specific Next.js imports
         content = remove_nextjs_exports(content)
         content = remove_overview_components(content)
         content = remove_jsx_comments(content)
@@ -817,11 +938,8 @@ def process_directory(in_dir: Path, out_dir: Path, platform: str):
             # First get the meta and raw content
             meta, content = extract_meta_from_file(index_file)
             if meta:
-                # Get workspace root for fragment processing
-                workspace_root = index_file.parent
-                while workspace_root.name != "src" and workspace_root.parent != workspace_root:
-                    workspace_root = workspace_root.parent
-                workspace_root = workspace_root.parent
+                # Get workspace root
+                workspace_root = get_workspace_root(index_file)
                 
                 # Process fragments with the current platform
                 content = process_fragments(content, index_file, platform, workspace_root)
@@ -837,8 +955,6 @@ def process_directory(in_dir: Path, out_dir: Path, platform: str):
                 output_path = out_dir / "index.md"
                 output_path.write_text(frontmatter + content, encoding='utf-8')
                 
-                # if not content.strip():
-                    # print(f"Warning: Empty content after processing {index_file}")
         except Exception as e:
             print(f"Error processing {index_file}: {e}")
     
@@ -865,10 +981,7 @@ def process_single_file(mdx_path: str, platform: str):
         meta, content = extract_meta_from_file(mdx_file)
             
         # Get workspace root for fragment processing
-        workspace_root = mdx_file.parent
-        while workspace_root.name != "src" and workspace_root.parent != workspace_root:
-            workspace_root = workspace_root.parent
-        workspace_root = workspace_root.parent
+        workspace_root = get_workspace_root(mdx_file)
         
         # Process fragments with the current platform
         processed_content = process_fragments(content, mdx_file, platform, workspace_root)
