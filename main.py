@@ -11,6 +11,7 @@ from parsers.fragments import process_fragments
 from parsers.filters import process_inline_filters
 from parsers.components import embed_protected_redaction_message
 from parsers.imports import remove_imports
+from parsers.media import print_media_paths
 
 def process_directory(in_dir: Path, out_dir: Path, platform: str):
     """Process a directory and its subdirectories.
@@ -88,9 +89,23 @@ def process_single_file(mdx_path: str, platform: str):
         mdx_path: Path to the MDX file to process
         platform: Current platform to process
     """
-    mdx_file = Path(mdx_path)
-    if not mdx_file.exists():
-        print(f"Error: File {mdx_path} does not exist!")
+    # Try different possible locations for the file
+    possible_paths = [
+        Path(mdx_path),  # Direct path
+        Path("llms-docs") / platform / mdx_path,  # In llms-docs/platform/
+        Path("src/pages/[platform]") / mdx_path,  # In src/pages/[platform]/
+    ]
+    
+    mdx_file = None
+    for path in possible_paths:
+        if path.exists():
+            mdx_file = path
+            break
+    
+    if mdx_file is None:
+        print(f"Error: File not found in any of:")
+        for path in possible_paths:
+            print(f"  - {path}")
         return
     
     try:
@@ -99,6 +114,10 @@ def process_single_file(mdx_path: str, platform: str):
         
         # Get meta and raw content
         meta, content = extract_meta_from_file(mdx_file)
+        
+        # Print any media paths found in the content
+        print(f"\nMedia paths in {mdx_file}:")
+        print_media_paths(content)
             
         # Process fragments with the current platform
         processed_content = process_fragments(content, mdx_file, platform, workspace_root)
