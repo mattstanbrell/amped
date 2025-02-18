@@ -1,8 +1,9 @@
 import os
 import tiktoken
+import argparse
 from pathlib import Path
 
-def count_tokens(text: str, model: str = "gpt-3.5-turbo") -> int:
+def count_tokens(text: str, model: str = "gpt-4o") -> int:
     """Count the number of tokens in a text string."""
     encoding = tiktoken.encoding_for_model(model)
     return len(encoding.encode(text))
@@ -39,22 +40,27 @@ def count_tokens_in_directory(directory: str, file_pattern: str = "*.md") -> dic
     return token_counts
 
 def main():
-    # Directory containing the NextJS documentation
-    nextjs_docs_dir = "../llms-docs/nextjs"
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description='Count tokens in documentation files.')
+    parser.add_argument('platform', help='Platform name (e.g., nextjs, android)')
+    args = parser.parse_args()
+    
+    # Directory containing the documentation
+    docs_dir = f"../llms-docs/{args.platform}"
     
     # Make the path absolute from the script location
     script_dir = Path(__file__).parent
-    nextjs_docs_dir = (script_dir.parent / "llms-docs/nextjs").resolve()
+    docs_dir = (script_dir.parent / f"llms-docs/{args.platform}").resolve()
     
-    if not nextjs_docs_dir.exists():
-        print(f"Error: Directory not found: {nextjs_docs_dir}")
+    if not docs_dir.exists():
+        print(f"Error: Directory not found: {docs_dir}")
         return
         
-    print(f"Scanning directory: {nextjs_docs_dir}")
+    print(f"Scanning directory: {docs_dir}")
     
     # Count tokens in both .md and .mdx files
-    md_counts = count_tokens_in_directory(nextjs_docs_dir, "*.md")
-    mdx_counts = count_tokens_in_directory(nextjs_docs_dir, "*.mdx")
+    md_counts = count_tokens_in_directory(docs_dir, "*.md")
+    mdx_counts = count_tokens_in_directory(docs_dir, "*.mdx")
     
     # Combine results
     total_counts = {
