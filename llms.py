@@ -17,7 +17,7 @@ META_REGEX = re.compile(
 )
 
 TITLE_REGEX = re.compile(r'["\']?title["\']?\s*:\s*["\']([^"\']*)["\']')
-DESCRIPTION_REGEX = re.compile(r'["\']?description["\']?\s*:\s*["\']([^"\']*)["\']')
+DESCRIPTION_REGEX = re.compile(r'["\']?description["\']?\s*:\s*(["\'])((?:(?!\1).)*)\1')
 PLATFORMS_REGEX = re.compile(r'["\']?platforms["\']?\s*:\s*\[(.*?)\]', re.DOTALL)
 
 def extract_string_array(array_str: str) -> list[str]:
@@ -526,6 +526,22 @@ def convert_cards_to_markdown(content: str) -> str:
     
     return ''.join(result)
 
+def convert_meta_to_frontmatter(meta: dict) -> str:
+    """Convert meta dictionary to frontmatter."""
+    # We only want title and description in the frontmatter
+    if not meta:
+        return ""
+    
+    lines = ["---"]
+    if 'title' in meta:
+        lines.append(f"title: {meta['title']}")
+    if 'description' in meta:
+        lines.append(f"description: {meta['description']}")
+    lines.append("---")
+    lines.append("")  # Add an empty line after the frontmatter
+    
+    return "\n".join(lines)
+
 def embed_protected_redaction_message(content: str, workspace_root: Path) -> str:
     """Embed protected redaction messages directly in markdown format."""
     print("\n=== Starting Protected Redaction Message Processing ===")
@@ -635,6 +651,55 @@ def embed_protected_redaction_message(content: str, workspace_root: Path) -> str
         import traceback
         traceback.print_exc()
         return content
+
+def extract_meta_from_file(file_path: Path) -> tuple[dict, str]:
+    """Extract meta information from an MDX file."""
+    try:
+        content = file_path.read_text(encoding='utf-8')
+        
+        # First embed any schemas - do this BEFORE removing imports
+        content = embed_schema(content, file_path)
+        
+        # Only remove Next.js specific imports and exports at this stage
+        content = remove_nextjs_imports(content)  # Only removes specific Next.js imports
+        content = remove_nextjs_exports(content)
+        content = remove_overview_components(content)
+        content = remove_jsx_comments(content)
+        
+        match = META_REGEX.search(content)
+        if match:
+            meta_str = match.group(1)
+            
+            # Extract just the fields we need
+            meta_dict = {}
+            
+            # Extract title
+            title_match = TITLE_REGEX.search(meta_str)
+            if title_match:
+                meta_dict['title'] = title_match.group(1)
+            
+            # Extract description
+            desc_match = DESCRIPTION_REGEX.search(meta_str)
+            if desc_match:
+                meta_dict['description'] = desc_match.group(2)
+            
+            # Extract platforms
+            platforms_match = PLATFORMS_REGEX.search(meta_str)
+            if platforms_match:
+                platforms_str = platforms_match.group(1)
+                meta_dict['platforms'] = extract_string_array(platforms_str)
+            
+            # Remove the meta export from content
+            content = META_REGEX.sub('', content)
+            
+            # Clean up any remaining empty lines
+            content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
+            
+            return meta_dict, content
+        return {}, content
+    except Exception as e:
+        print(f"Error reading {file_path}: {e}")
+        return {}, ""
 
 def get_workspace_root(file_path: Path) -> Path:
     """Find the workspace root by looking for src directory"""
@@ -835,17 +900,20 @@ def process_fragments(content: str, file_path: Path, platform: str, workspace_ro
         if non_code_content.strip():
             result.append(non_code_content.strip())
     
-    # Join all sections with proper spacing
+    # Join all sections with proper spacing and ensure consistent line endings
     content = '\n\n'.join(result)
     
     # Clean up multiple empty lines but preserve double newlines
     content = re.sub(r'\n{3,}', '\n\n', content)
     
+    # Ensure file ends with exactly one newline
+    content = content.rstrip() + '\n'
+    
     print(f"\nFinal content length: {len(content)}")
     print(f"Final content preview:\n{content[:500]}...")
     print(f"\n{'='*80}\n")
     
-    return content.strip()
+    return content
 
 def split_content_and_code_blocks(content: str) -> list[tuple[str, bool]]:
     """Split content into alternating non-code and code blocks.
@@ -960,75 +1028,6 @@ def remove_jsx_comments(content: str) -> str:
     
     return ''.join(result).strip()
 
-def extract_meta_from_file(file_path: Path) -> tuple[dict, str]:
-    """Extract meta information from an MDX file."""
-    try:
-        content = file_path.read_text(encoding='utf-8')
-        
-        # First embed any schemas - do this BEFORE removing imports
-        content = embed_schema(content, file_path)
-        
-        # Only remove Next.js specific imports and exports at this stage
-        content = remove_nextjs_imports(content)  # Only removes specific Next.js imports
-        content = remove_nextjs_exports(content)
-        content = remove_overview_components(content)
-        content = remove_jsx_comments(content)
-        
-        match = META_REGEX.search(content)
-        if match:
-            meta_str = match.group(1)
-            
-            # Extract just the fields we need
-            meta_dict = {}
-            
-            # Extract title
-            title_match = TITLE_REGEX.search(meta_str)
-            if title_match:
-                meta_dict['title'] = title_match.group(1)
-            
-            # Extract description
-            desc_match = DESCRIPTION_REGEX.search(meta_str)
-            if desc_match:
-                meta_dict['description'] = desc_match.group(1)
-            
-            # Extract platforms
-            platforms_match = PLATFORMS_REGEX.search(meta_str)
-            if platforms_match:
-                platforms_str = platforms_match.group(1)
-                meta_dict['platforms'] = extract_string_array(platforms_str)
-            
-            # Remove the meta export from content
-            content = META_REGEX.sub('', content)
-            
-            # Clean up any remaining empty lines
-            content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
-            
-            return meta_dict, content
-        return {}, content
-    except Exception as e:
-        print(f"Error reading {file_path}: {e}")
-        return {}, ""
-
-def convert_meta_to_frontmatter(meta: dict) -> str:
-    """Convert meta dictionary to YAML frontmatter."""
-    # We only want title and description in the frontmatter
-    frontmatter = {}
-    if 'title' in meta:
-        frontmatter['title'] = meta['title']
-    if 'description' in meta:
-        frontmatter['description'] = meta['description']
-    
-    if not frontmatter:
-        return ""
-    
-    try:
-        # Convert to YAML, preserving order
-        yaml_str = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
-        return f"---\n{yaml_str}---\n\n"
-    except Exception as e:
-        print(f"Error converting meta to YAML: {e}")
-        return ""
-
 def extract_platforms_from_file(file_path: Path) -> list[str] | None:
     """Extract platforms array from index.mdx meta."""
     meta, _ = extract_meta_from_file(file_path)
@@ -1072,10 +1071,18 @@ def process_directory(in_dir: Path, out_dir: Path, platform: str):
                 # Create output directory
                 out_dir.mkdir(parents=True, exist_ok=True)
                 
-                # Generate frontmatter and write to output file
+                # Generate frontmatter
                 frontmatter = convert_meta_to_frontmatter(meta)
+                
+                # Combine content with an extra newline after frontmatter
+                final_content = frontmatter + "\n" + content.lstrip()
+                
+                # Ensure exactly one newline at end of file
+                final_content = final_content.rstrip() + '\n'
+                
+                # Write the output file
                 output_path = out_dir / "index.md"
-                output_path.write_text(frontmatter + content, encoding='utf-8')
+                output_path.write_text(final_content, encoding='utf-8')
                 
         except Exception as e:
             print(f"Error processing {index_file}: {e}")
@@ -1104,18 +1111,9 @@ def process_single_file(mdx_path: str, platform: str):
         
         # Get meta and raw content
         meta, content = extract_meta_from_file(mdx_file)
-        
+            
         # Process fragments with the current platform
-        content = process_fragments(content, mdx_file, platform, workspace_root)
-        
-        # Process InlineFilter blocks
-        content = process_inline_filters(content, platform)
-        
-        # Process protected redaction messages
-        content = embed_protected_redaction_message(content, workspace_root)
-        
-        # Remove all imports
-        content = remove_imports(content, mdx_file)
+        processed_content = process_fragments(content, mdx_file, platform, workspace_root)
         
         # Create output path
         output_path = mdx_file.with_suffix('.md')
@@ -1123,8 +1121,14 @@ def process_single_file(mdx_path: str, platform: str):
         # Generate frontmatter
         frontmatter = convert_meta_to_frontmatter(meta)
         
+        # Combine content with an extra newline after frontmatter
+        final_content = frontmatter + "\n" + processed_content.lstrip()
+        
+        # Ensure exactly one newline at end of file
+        final_content = final_content.rstrip() + '\n'
+        
         # Write the output file
-        output_path.write_text(frontmatter + content, encoding='utf-8')
+        output_path.write_text(final_content, encoding='utf-8')
             
     except Exception as e:
         print(f"Error processing file: {e}")
