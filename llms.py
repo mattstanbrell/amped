@@ -526,6 +526,116 @@ def convert_cards_to_markdown(content: str) -> str:
     
     return ''.join(result)
 
+def embed_protected_redaction_message(content: str, workspace_root: Path) -> str:
+    """Embed protected redaction messages directly in markdown format."""
+    print("\n=== Starting Protected Redaction Message Processing ===")
+    print(f"Content length: {len(content)}")
+    print(f"Content preview:\n{content[:500]}...")
+    
+    # First check if we need to process any redaction messages
+    if not re.search(r'<ProtectedRedactionGen[12]Message\s*/>', content):
+        print("No redaction messages found to process")
+        return content
+
+    # Try to read the message component file
+    message_file = workspace_root / "src/protected/ProtectedRedactionMessage/index.tsx"
+    print(f"\nLooking for message file at: {message_file}")
+    if not message_file.exists():
+        print("Message file not found!")
+        return content
+
+    try:
+        # Read the message component file
+        message_content = message_file.read_text(encoding='utf-8')
+        print(f"\nFound message file, length: {len(message_content)}")
+        print(f"Message file preview:\n{message_content[:500]}...")
+        
+        # Extract Gen1 and Gen2 message components
+        message_components = {}
+        for gen in ['1', '2']:
+            print(f"\nProcessing Gen{gen} message...")
+            component_pattern = re.compile(
+                rf'export\s+const\s+ProtectedRedactionGen{gen}Message\s*=\s*\(\)\s*=>\s*\(\s*'
+                r'<Callout\s+warning[^>]*>\s*([\s\S]*?)\s*</Callout>\s*\)',
+                re.DOTALL
+            )
+            match = component_pattern.search(message_content)
+            if match:
+                print(f"Found Gen{gen} message content")
+                # Extract the content and convert to markdown
+                callout_content = match.group(1)
+                print(f"Raw callout content:\n{callout_content}")
+                
+                # Convert paragraph tags to newlines
+                md_content = re.sub(r'<p>(.*?)</p>', r'\1\n', callout_content)
+                
+                # Convert code tags
+                md_content = re.sub(r'<code>(.*?)</code>', r'`\1`', md_content)
+                
+                # Convert list items
+                md_content = re.sub(r'<ul>\s*([\s\S]*?)\s*</ul>', lambda m: '\n' + re.sub(r'<li>(.*?)</li>', r'- \1', m.group(1)), md_content)
+                
+                # Clean up any remaining HTML tags
+                md_content = re.sub(r'<[^>]+>', '', md_content)
+                
+                # Clean up whitespace and empty lines
+                md_content = re.sub(r'\n\s*\n\s*\n', '\n\n', md_content)
+                md_content = md_content.strip()
+                
+                print(f"\nConverted to markdown:\n{md_content}")
+                
+                # Format as GitHub-flavored markdown warning with proper quoting
+                lines = md_content.split('\n')
+                quoted_lines = [f"> {line}" if line.strip() else ">" for line in lines]
+                formatted_message = f"\n\n> [!WARNING]\n" + "\n".join(quoted_lines) + "\n\n"
+                
+                print(f"\nFinal formatted message:\n{formatted_message}")
+                
+                message_components[f'Gen{gen}'] = formatted_message
+            else:
+                print(f"No Gen{gen} message found in component file")
+        
+        print("\nRemoving imports...")
+        # First remove the imports
+        content_before = content
+        content = re.sub(
+            r'^import\s*{\s*ProtectedRedactionGen[12]Message\s*}\s*from\s*[\'"]@/protected/ProtectedRedactionMessage[\'"].*?\n',
+            '',
+            content,
+            flags=re.MULTILINE
+        )
+        if content == content_before:
+            print("Warning: Import removal didn't change content")
+        else:
+            print("Import successfully removed")
+        
+        print("\nReplacing components...")
+        # Then replace each component usage with its markdown
+        for gen, message in message_components.items():
+            content_before = content
+            content = re.sub(
+                rf'<ProtectedRedaction{gen}Message\s*/>\s*\n?',
+                message,
+                content,
+                flags=re.MULTILINE
+            )
+            if content == content_before:
+                print(f"Warning: {gen} component replacement didn't change content")
+            else:
+                print(f"{gen} component successfully replaced")
+        
+        print("\n=== Protected Redaction Message Processing Complete ===")
+        print(f"Final content length: {len(content)}")
+        print(f"Final content preview:\n{content[:500]}...")
+        
+        return content
+            
+    except Exception as e:
+        print(f"Error processing protected redaction messages: {e}")
+        import traceback
+        traceback.print_exc()
+        return content
+
 def get_workspace_root(file_path: Path) -> Path:
     """Find the workspace root by looking for src directory"""
     current = file_path.resolve()  # Resolve any symlinks and get absolute path
@@ -548,8 +658,14 @@ def process_fragments(content: str, file_path: Path, platform: str, workspace_ro
     print(f"Content preview:\n{content[:500]}...")
     print(f"{'='*80}\n")
 
-    # First embed any JSON schemas
+    # First embed any schemas
     content = embed_schema(content, file_path)
+    
+    # Process InlineFilter blocks BEFORE protected redaction messages
+    content = process_inline_filters(content, platform)
+    
+    # Now process protected redaction messages
+    content = embed_protected_redaction_message(content, workspace_root)
     
     # Convert UI tables to markdown
     content = convert_ui_table_to_markdown(content)
@@ -852,7 +968,7 @@ def extract_meta_from_file(file_path: Path) -> tuple[dict, str]:
         # First embed any schemas - do this BEFORE removing imports
         content = embed_schema(content, file_path)
         
-        # Remove only Next.js specific imports and exports
+        # Only remove Next.js specific imports and exports at this stage
         content = remove_nextjs_imports(content)  # Only removes specific Next.js imports
         content = remove_nextjs_exports(content)
         content = remove_overview_components(content)
@@ -935,17 +1051,23 @@ def process_directory(in_dir: Path, out_dir: Path, platform: str):
             return
         
         try:
+            # Get workspace root
+            workspace_root = get_workspace_root(index_file)
+            
             # First get the meta and raw content
             meta, content = extract_meta_from_file(index_file)
             if meta:
-                # Get workspace root
-                workspace_root = get_workspace_root(index_file)
-                
                 # Process fragments with the current platform
                 content = process_fragments(content, index_file, platform, workspace_root)
                 
                 # Process InlineFilter blocks
                 content = process_inline_filters(content, platform)
+                
+                # Process protected redaction messages
+                content = embed_protected_redaction_message(content, workspace_root)
+                
+                # Remove all imports
+                content = remove_imports(content, index_file)
                 
                 # Create output directory
                 out_dir.mkdir(parents=True, exist_ok=True)
@@ -977,14 +1099,23 @@ def process_single_file(mdx_path: str, platform: str):
         return
     
     try:
-        # Get meta and raw content
-        meta, content = extract_meta_from_file(mdx_file)
-            
         # Get workspace root for fragment processing
         workspace_root = get_workspace_root(mdx_file)
         
+        # Get meta and raw content
+        meta, content = extract_meta_from_file(mdx_file)
+        
         # Process fragments with the current platform
-        processed_content = process_fragments(content, mdx_file, platform, workspace_root)
+        content = process_fragments(content, mdx_file, platform, workspace_root)
+        
+        # Process InlineFilter blocks
+        content = process_inline_filters(content, platform)
+        
+        # Process protected redaction messages
+        content = embed_protected_redaction_message(content, workspace_root)
+        
+        # Remove all imports
+        content = remove_imports(content, mdx_file)
         
         # Create output path
         output_path = mdx_file.with_suffix('.md')
@@ -993,7 +1124,7 @@ def process_single_file(mdx_path: str, platform: str):
         frontmatter = convert_meta_to_frontmatter(meta)
         
         # Write the output file
-        output_path.write_text(frontmatter + processed_content, encoding='utf-8')
+        output_path.write_text(frontmatter + content, encoding='utf-8')
             
     except Exception as e:
         print(f"Error processing file: {e}")
