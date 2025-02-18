@@ -11,7 +11,8 @@ from .components import (
     embed_protected_redaction_message,
     convert_ui_table_to_markdown,
     convert_cards_to_markdown,
-    remove_jsx_comments
+    remove_jsx_comments,
+    remove_overview_components
 )
 
 def process_fragments(content: str, file_path: Path, platform: str, workspace_root: Path) -> str:
@@ -48,6 +49,9 @@ def process_fragments(content: str, file_path: Path, platform: str, workspace_ro
     
     # Convert Cards to markdown
     content = convert_cards_to_markdown(content)
+    
+    # Remove Overview components
+    content = remove_overview_components(content)
     
     # Remove JSX comments
     content = remove_jsx_comments(content)
