@@ -1,8 +1,20 @@
 """Main entry point for MDX to MD conversion."""
 
 import sys
+import os
 from pathlib import Path
 import traceback
+from dotenv import load_dotenv
+
+# Load environment variables from .env.local
+env_path = Path(__file__).parent / '.env.local'
+load_dotenv(env_path)
+
+# Configure Gemini with API key
+import google.generativeai as genai
+if 'GOOGLE_API_KEY' not in os.environ:
+    os.environ['GOOGLE_API_KEY'] = os.getenv('GEMINI_API_KEY', '')  # Try alternate name if exists
+genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
 
 from parsers.platforms import PLATFORMS, extract_platforms_from_file
 from parsers.utils import get_workspace_root
@@ -11,7 +23,7 @@ from parsers.fragments import process_fragments
 from parsers.filters import process_inline_filters
 from parsers.components import embed_protected_redaction_message
 from parsers.imports import remove_imports
-from parsers.media import print_media_paths
+from parsers.media import process_media_in_content
 
 def process_directory(in_dir: Path, out_dir: Path, platform: str):
     """Process a directory and its subdirectories.
@@ -89,6 +101,10 @@ def process_single_file(mdx_path: str, platform: str):
         mdx_path: Path to the MDX file to process
         platform: Current platform to process
     """
+    # If no extension provided, assume it's a directory and append index.mdx
+    if not Path(mdx_path).suffix:
+        mdx_path = str(Path(mdx_path) / "index.mdx")
+    
     # Try different possible locations for the file
     possible_paths = [
         Path(mdx_path),  # Direct path
@@ -115,10 +131,6 @@ def process_single_file(mdx_path: str, platform: str):
         # Get meta and raw content
         meta, content = extract_meta_from_file(mdx_file)
         
-        # Print any media paths found in the content
-        print(f"\nMedia paths in {mdx_file}:")
-        print_media_paths(content)
-            
         # Process fragments with the current platform
         processed_content = process_fragments(content, mdx_file, platform, workspace_root)
         
@@ -130,6 +142,9 @@ def process_single_file(mdx_path: str, platform: str):
         
         # Combine content with an extra newline after frontmatter
         final_content = frontmatter + "\n" + processed_content.lstrip()
+        
+        # Process media elements and add Gemini descriptions
+        final_content = process_media_in_content(final_content, workspace_root, platform)
         
         # Ensure exactly one newline at end of file
         final_content = final_content.rstrip() + '\n'
