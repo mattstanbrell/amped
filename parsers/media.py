@@ -1,7 +1,7 @@
 """Functions for handling media components in markdown/MDX content."""
 
 import re
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from pathlib import Path
 from .media_description import analyze_doc_with_media, generate_media_description
 
@@ -79,7 +79,7 @@ def process_media_in_content(
         if media_type == 'image':
             media_element = f'![{description}]({file_path})'
         else:
-            media_element = f'<Video src="{file_path}" description="{description}" />'
+            media_element = f'<Video src="{file_path}" description="{description}"/>'
         
         # Find the context for this media
         media_context = next(
@@ -101,13 +101,18 @@ def process_media_in_content(
         )
         
         if gemini_description:
-            media_descriptions[media_element] = gemini_description
+            # Clean up description and add source URL
+            clean_description = gemini_description.strip()
+            url = f"https://docs.amplify.aws{file_path}"
+            formatted_description = f"[{clean_description}\nSource: {url}]"
+            media_descriptions[media_element] = formatted_description
+        # If we couldn't process the media, just skip it (keeping original tag)
     
     # Insert descriptions under each media element
-    for media_element, description in media_descriptions.items():
+    for media_element, formatted_description in media_descriptions.items():
         content = content.replace(
             media_element,
-            f"{media_element}\n[{description}]"
+            f"{media_element}\n{formatted_description}"
         )
     
     return content

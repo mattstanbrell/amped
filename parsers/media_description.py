@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Optional, Dict, List
 from pydantic import BaseModel
 import google.generativeai as genai
+from google.ai.generativelanguage_v1beta.types import content
 import time
+import json
 
 class MediaContext(BaseModel):
     """Context for a media file within a document."""
@@ -29,9 +31,15 @@ def download_media_file(file_path: str) -> Optional[str]:
     Returns:
         Path to the downloaded file if successful, None if failed
     """
-    # Extract just the media path portion (e.g. /images/gen2/manage/user-manager.mp4)
-    media_path = '/images' + '/' + '/'.join(Path(file_path).parts[-3:])  # Get last 3 parts to include gen2
-    url = f"https://docs.amplify.aws{media_path}"
+    # First try the optimized .webp version for images
+    if file_path.lower().endswith(('.png', '.jpg', '.jpeg')):
+        webp_path = file_path.rsplit('.', 1)[0] + '.webp'
+        url = f"https://docs.amplify.aws{webp_path}"
+    else:
+        # For non-image files or if webp fails, use original path
+        url = f"https://docs.amplify.aws{file_path}"
+    
+    print(f"Attempting to download: {url}")
     
     try:
         # Create a temporary directory if it doesn't exist
@@ -40,6 +48,8 @@ def download_media_file(file_path: str) -> Optional[str]:
         
         # Just use the filename for local storage, with a prefix to avoid collisions
         filename = Path(file_path).name
+        if file_path.lower().endswith(('.png', '.jpg', '.jpeg')):
+            filename = filename.rsplit('.', 1)[0] + '.webp'
         local_path = temp_dir / f"gen2_{filename}"
         
         # Download the file if it doesn't exist
@@ -53,6 +63,19 @@ def download_media_file(file_path: str) -> Optional[str]:
         
     except Exception as e:
         print(f"Error downloading {url}: {e}")
+        # If webp failed, try original format as fallback
+        if file_path.lower().endswith(('.png', '.jpg', '.jpeg')):
+            print("Trying original format as fallback...")
+            url = f"https://docs.amplify.aws{file_path}"
+            try:
+                local_path = temp_dir / f"gen2_{filename}"
+                print(f"Downloading {url} to {local_path}")
+                response = httpx.get(url)
+                response.raise_for_status()
+                local_path.write_bytes(response.content)
+                return str(local_path)
+            except Exception as e2:
+                print(f"Error downloading original format {url}: {e2}")
         return None
 
 def get_base64_image(image_path: str) -> Optional[tuple[str, str]]:
@@ -108,18 +131,72 @@ def analyze_doc_with_media(
     Returns:
         DocAnalysis object if successful, None if failed
     """
+    print("\n=== Starting document analysis ===")
+    print(f"Platform: {platform}")
+    print(f"Number of media elements: {len(media_elements)}")
+    for typ, path, desc in media_elements:
+        print(f"- {typ}: {path} ({desc})")
+    
+    if not media_elements:
+        print("No media elements found, returning empty analysis")
+        return DocAnalysis(
+            doc_summary="No media elements to analyze",
+            media_contexts=[]
+        )
+
     if api_key:
+        print("Configuring Gemini with provided API key")
         genai.configure(api_key=api_key)
 
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    print("Creating Gemini model instance")
+    
+    # Define the schema for media contexts
+    media_context_schema = content.Schema(
+        type=content.Type.OBJECT,
+        properties={
+            "file_path": content.Schema(type=content.Type.STRING),
+            "context": content.Schema(type=content.Type.STRING),
+        },
+        required=["file_path", "context"]
+    )
+    
+    # Define the full response schema
+    response_schema = content.Schema(
+        type=content.Type.OBJECT,
+        properties={
+            "doc_summary": content.Schema(type=content.Type.STRING),
+            "media_contexts": content.Schema(
+                type=content.Type.ARRAY,
+                items=media_context_schema
+            ),
+        },
+        required=["doc_summary", "media_contexts"]
+    )
+    
+    generation_config = {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 40,
+        "max_output_tokens": 8192,
+        "response_schema": response_schema,
+        "response_mime_type": "application/json",
+    }
+    
+    model = genai.GenerativeModel(
+        model_name="gemini-2.0-flash",
+        generation_config=generation_config,
+    )
     
     # Create the prompt for document analysis
     prompt = f"""This is documentation for AWS Amplify Gen 2, a code-first development experience that allows developers to use TypeScript to build full-stack applications on AWS, automatically provisioning the cloud infrastructure based on the app's requirements.
 This specific document is for the {platform} platform.
 
 Please analyze this documentation and its media elements. Return a JSON object with:
-1. A comprehensive summary of the document
-2. For each media element, provide context about how it fits into the document and what it's meant to illustrate
+1. A comprehensive summary of the document in the "doc_summary" field
+2. For each media element, provide context about how it fits into the document in the "media_contexts" array
+3. Each media_contexts array item should have two fields:
+   - "file_path": The path of the media file
+   - "context": A description of how this media element fits into the document
 
 The media elements are:
 {chr(10).join(f'- {typ}: {path} ({desc})' for typ, path, desc in media_elements)}
@@ -127,23 +204,56 @@ The media elements are:
 Document content:
 {doc_content}"""
 
+    print("\nSending prompt to Gemini")
+    print("Prompt length:", len(prompt))
+    print("First 500 chars of prompt:", prompt[:500])
+    
     try:
-        response = model.generate_content(
-            prompt,
-            generation_config={
-                'response_mime_type': 'application/json',
-                'response_schema': DocAnalysis,
-            }
-        )
+        print("\nCalling Gemini generate_content...")
+        response = model.generate_content(prompt)
+        print("Got response from Gemini")
         
-        # Parse the JSON response manually since we can't use .parsed yet
-        import json
+        print("\nRaw response from Gemini:")
+        print("------------------------")
+        print(response.text)
+        print("------------------------")
+        
+        print("\nParsing JSON response...")
         result = json.loads(response.text)
-        return DocAnalysis(**result)
+        
+        # Convert the raw JSON into our Pydantic model
+        analysis = DocAnalysis(
+            doc_summary=result["doc_summary"],
+            media_contexts=[
+                MediaContext(
+                    file_path=ctx["file_path"],
+                    context=ctx["context"]
+                )
+                for ctx in result["media_contexts"]
+            ]
+        )
+        print("Successfully created DocAnalysis object")
+        
+        return analysis
         
     except Exception as e:
-        print(f"Error analyzing document: {e}")
-        return None
+        print(f"\nError during document analysis: {e}")
+        print(f"Error type: {type(e).__name__}")
+        import traceback
+        print("Traceback:")
+        traceback.print_exc()
+        
+        print("\nReturning fallback analysis")
+        return DocAnalysis(
+            doc_summary="Error analyzing document",
+            media_contexts=[
+                MediaContext(
+                    file_path=path,
+                    context=desc or "No context available"
+                )
+                for _, path, desc in media_elements
+            ]
+        )
 
 def upload_to_gemini(path: str, mime_type: Optional[str] = None):
     """Uploads the given file to Gemini.

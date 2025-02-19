@@ -64,6 +64,9 @@ def process_directory(in_dir: Path, out_dir: Path, platform: str):
                 # Remove all imports
                 content = remove_imports(content, index_file)
                 
+                # Process media elements and add Gemini descriptions
+                content = process_media_in_content(content, workspace_root, platform)
+                
                 # Create output directory
                 out_dir.mkdir(parents=True, exist_ok=True)
                 
@@ -95,47 +98,61 @@ def process_directory(in_dir: Path, out_dir: Path, platform: str):
             process_directory(item, out_subdir, platform)
 
 def process_single_file(mdx_path: str, platform: str):
-    """Process a single MDX file and output the corresponding MD file.
+    """Process a single MDX file or directory and output the corresponding MD file(s).
     
     Args:
-        mdx_path: Path to the MDX file to process
+        mdx_path: Path to the MDX file or directory to process
         platform: Current platform to process
     """
-    # If no extension provided, assume it's a directory and append index.mdx
-    if not Path(mdx_path).suffix:
-        mdx_path = str(Path(mdx_path) / "index.mdx")
-    
-    # Try different possible locations for the file
+    # Try different possible locations for the file/directory
     possible_paths = [
+        Path("src/pages/[platform]") / mdx_path,  # In src/pages/[platform]/ (prioritize source)
         Path(mdx_path),  # Direct path
         Path("llms-docs") / platform / mdx_path,  # In llms-docs/platform/
-        Path("src/pages/[platform]") / mdx_path,  # In src/pages/[platform]/
     ]
     
-    mdx_file = None
+    print("\nLooking for path in:")
+    for path in possible_paths:
+        print(f"  - {path} ({'exists' if path.exists() else 'not found'})")
+    
+    target_path = None
     for path in possible_paths:
         if path.exists():
-            mdx_file = path
+            target_path = path
             break
     
-    if mdx_file is None:
-        print(f"Error: File not found in any of:")
+    if target_path is None:
+        print(f"Error: Path not found in any of:")
         for path in possible_paths:
             print(f"  - {path}")
         return
+
+    # If it's a directory, process it recursively
+    if target_path.is_dir():
+        print(f"\nProcessing directory: {target_path}")
+        # Create output directory in llms-docs/[platform]/
+        relative_path = target_path.relative_to(Path("src/pages/[platform]"))
+        out_dir = Path(f"llms-docs/{platform}") / relative_path
+        print(f"Output directory: {out_dir}")
+        process_directory(target_path, out_dir, platform)
+        return
+
+    # If no extension provided and not a directory, assume it's a directory and append index.mdx
+    if not target_path.suffix:
+        target_path = target_path / "index.mdx"
     
     try:
         # Get workspace root for fragment processing
-        workspace_root = get_workspace_root(mdx_file)
+        workspace_root = get_workspace_root(target_path)
         
         # Get meta and raw content
-        meta, content = extract_meta_from_file(mdx_file)
+        meta, content = extract_meta_from_file(target_path)
         
         # Process fragments with the current platform
-        processed_content = process_fragments(content, mdx_file, platform, workspace_root)
+        processed_content = process_fragments(content, target_path, platform, workspace_root)
         
         # Create output path
-        output_path = mdx_file.with_suffix('.md')
+        output_path = target_path.with_suffix('.md')
         
         # Generate frontmatter
         frontmatter = convert_meta_to_frontmatter(meta)
