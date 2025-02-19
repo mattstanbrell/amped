@@ -22,35 +22,62 @@ class DocAnalysis(BaseModel):
     doc_summary: str
     media_contexts: List[MediaContext]
 
-def download_media_file(file_path: str) -> Optional[str]:
+def download_media_file(src: str) -> Optional[str]:
     """Download a media file from the Amplify docs website.
     
     Args:
-        file_path: Path to the media file (e.g., /images/gen2/manage/user-manager.mp4)
+        src: The src URL from markdown (e.g., /images/example.png)
         
     Returns:
         Path to the downloaded file if successful, None if failed
     """
-    # First try the optimized .webp version for images
-    if file_path.lower().endswith(('.png', '.jpg', '.jpeg')):
-        webp_path = file_path.rsplit('.', 1)[0] + '.webp'
-        url = f"https://docs.amplify.aws{webp_path}"
-    else:
-        # For non-image files or if webp fails, use original path
-        url = f"https://docs.amplify.aws{file_path}"
+    print("\n=== download_media_file ===")
+    print(f"Input src: {src!r}")
     
-    print(f"Attempting to download: {url}")
+    # VALIDATE: Must be a markdown src URL starting with /images or /videos
+    if not src.startswith(('/images/', '/videos/')):
+        print(f"ERROR: Invalid src URL format - must start with /images/ or /videos/: {src!r}")
+        return None
+        
+    # VALIDATE: Must not contain Desktop or absolute paths
+    if 'Desktop' in src or src.startswith('/Users/'):
+        print(f"ERROR: Received file path instead of markdown src URL: {src!r}")
+        print("This is likely a bug - we should only receive the src from markdown!")
+        return None
+    
+    # Check if this is an image that needs to be converted to WEBP
+    if src.lower().endswith(('.png', '.jpg', '.jpeg')):
+        # Extract the path components
+        path_parts = src.rsplit('/', 1)  # Split on last /
+        if len(path_parts) == 2:
+            directory = path_parts[0]  # e.g. /images/auth/examples
+            filename = path_parts[1].rsplit('.', 1)[0]  # Remove extension
+            print(f"Image file detected:")
+            print(f"  Directory: {directory!r}")
+            print(f"  Filename: {filename!r}")
+            # Insert nextImageExportOptimizer in the same directory
+            media_path = f"{directory}/nextImageExportOptimizer/{filename}-opt-1920.WEBP"
+        else:
+            print("Invalid image path format")
+            return None
+    else:
+        # For non-image files (e.g., videos), use the original path
+        print("Non-image file, using original path")
+        media_path = src
+    
+    print(f"Final media_path: {media_path!r}")
+    url = f"https://docs.amplify.aws{media_path}"
+    print(f"Final URL: {url}")
     
     try:
         # Create a temporary directory if it doesn't exist
         temp_dir = Path(tempfile.gettempdir()) / "amplify_media"
         temp_dir.mkdir(exist_ok=True)
         
-        # Just use the filename for local storage, with a prefix to avoid collisions
-        filename = Path(file_path).name
-        if file_path.lower().endswith(('.png', '.jpg', '.jpeg')):
-            filename = filename.rsplit('.', 1)[0] + '.webp'
-        local_path = temp_dir / f"gen2_{filename}"
+        # Use a sanitized version of the original filename
+        safe_filename = src.rsplit('/', 1)[-1]  # Just the filename part
+        local_path = temp_dir / f"gen2_{safe_filename}"
+        print(f"Local save path: {local_path}")
         
         # Download the file if it doesn't exist
         if not local_path.exists():
@@ -58,58 +85,48 @@ def download_media_file(file_path: str) -> Optional[str]:
             response = httpx.get(url)
             response.raise_for_status()
             local_path.write_bytes(response.content)
+            print("Download successful")
             
         return str(local_path)
         
     except Exception as e:
         print(f"Error downloading {url}: {e}")
-        # If webp failed, try original format as fallback
-        if file_path.lower().endswith(('.png', '.jpg', '.jpeg')):
-            print("Trying original format as fallback...")
-            url = f"https://docs.amplify.aws{file_path}"
-            try:
-                local_path = temp_dir / f"gen2_{filename}"
-                print(f"Downloading {url} to {local_path}")
-                response = httpx.get(url)
-                response.raise_for_status()
-                local_path.write_bytes(response.content)
-                return str(local_path)
-            except Exception as e2:
-                print(f"Error downloading original format {url}: {e2}")
+        print(f"Error type: {type(e).__name__}")
+        import traceback
+        print("Traceback:")
+        traceback.print_exc()
         return None
 
-def get_base64_image(image_path: str) -> Optional[tuple[str, str]]:
-    """Convert an image file to base64 encoding.
+def get_base64_image(src: str) -> Optional[tuple[str, str]]:
+    """Convert an image from the docs site to base64 encoding.
     
     Args:
-        image_path: Path to the image file
+        src: The src URL from markdown (e.g., /images/example.png)
         
     Returns:
-        Tuple of (mime_type, base64_data) if successful, None if file not found
+        Tuple of (mime_type, base64_data) if successful, None if download fails
     """
-    # First try to download if it's not a local file
-    if not os.path.exists(image_path):
-        downloaded_path = download_media_file(image_path)
-        if not downloaded_path:
-            return None
-        image_path = downloaded_path
+    # Download the image
+    downloaded_path = download_media_file(src)
+    if not downloaded_path:
+        return None
         
     # Get file extension and map to mime type
-    ext = Path(image_path).suffix.lower()
+    ext = downloaded_path.lower().split('.')[-1]
     mime_types = {
-        '.png': 'image/png',
-        '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg',
-        '.webp': 'image/webp',
-        '.heic': 'image/heic',
-        '.heif': 'image/heif'
+        'png': 'image/png',
+        'jpg': 'image/jpeg',
+        'jpeg': 'image/jpeg',
+        'webp': 'image/webp',
+        'heic': 'image/heic',
+        'heif': 'image/heif'
     }
     
     mime_type = mime_types.get(ext)
     if not mime_type:
         return None
         
-    with open(image_path, 'rb') as img_file:
+    with open(downloaded_path, 'rb') as img_file:
         img_data = img_file.read()
         base64_data = base64.b64encode(img_data).decode('utf-8')
         return (mime_type, base64_data)
@@ -285,7 +302,7 @@ def wait_for_files_active(files: List) -> None:
     print()
 
 def generate_media_description(
-    file_path: str,
+    src: str,
     media_element: str,
     doc_summary: str,
     media_context: str,
@@ -295,7 +312,7 @@ def generate_media_description(
     """Generate a comprehensive description of a media file using Gemini.
     
     Args:
-        file_path: Path to the media file
+        src: The src URL from markdown (e.g., /images/example.png)
         media_element: The original media element from the doc (e.g., ![...] or <Video.../>)
         doc_summary: Summary of the document this media appears in
         media_context: Context about this specific media's role in the doc
@@ -308,19 +325,16 @@ def generate_media_description(
     if api_key:
         genai.configure(api_key=api_key)
     
-    print(f"\nProcessing media file: {file_path}")
+    print(f"\nProcessing media file: {src}")
     
-    # First try to download if it's not a local file
-    if not os.path.exists(file_path):
-        downloaded_path = download_media_file(file_path)
-        if not downloaded_path:
-            return None
-        file_path = downloaded_path
-        print(f"Downloaded to: {file_path}")
+    # Download the file
+    downloaded_path = download_media_file(src)
+    if not downloaded_path:
+        return None
+    print(f"Downloaded to: {downloaded_path}")
     
     # Determine if this is an image or video based on extension
-    ext = Path(file_path).suffix.lower()
-    is_video = ext in ['.mp4', '.mpeg', '.mov', '.avi', '.flv', '.mpg', '.webm', '.wmv', '.3gp']
+    is_video = src.lower().endswith(('.mp4', '.mpeg', '.mov', '.avi', '.flv', '.mpg', '.webm', '.wmv', '.3gp'))
     print(f"Media type: {'video' if is_video else 'image'}")
     
     context = f"""This media file appears in AWS Amplify Gen 2 documentation for the {platform} platform.
@@ -356,9 +370,9 @@ Context for this media: {media_context}"""
     if is_video:
         try:
             # Upload the video and wait for processing
-            mime_type = f"video/{ext.lstrip('.')}"
+            mime_type = f"video/{src.split('.')[-1]}"
             print(f"\nUploading video with MIME type: {mime_type}")
-            video_file = upload_to_gemini(file_path, mime_type=mime_type)
+            video_file = upload_to_gemini(downloaded_path, mime_type=mime_type)
             wait_for_files_active([video_file])
             
             # Start chat with video context
@@ -391,11 +405,11 @@ Please provide a concise description of this video that captures the key informa
             return response.text
             
         except Exception as e:
-            print(f"Error processing video {file_path}: {e}")
+            print(f"Error processing video {downloaded_path}: {e}")
             return None
             
     else:
-        img_data = get_base64_image(file_path)
+        img_data = get_base64_image(src)
         if not img_data:
             return None
             
@@ -404,7 +418,7 @@ Please provide a concise description of this video that captures the key informa
         
         try:
             # Upload the image and wait for processing
-            image_file = upload_to_gemini(file_path, mime_type=mime_type)
+            image_file = upload_to_gemini(downloaded_path, mime_type=mime_type)
             wait_for_files_active([image_file])
             
             # Start chat with image context
@@ -437,5 +451,5 @@ Please provide a concise description of this image that captures the key informa
             return response.text
             
         except Exception as e:
-            print(f"Error processing image {file_path}: {e}")
+            print(f"Error processing image {downloaded_path}: {e}")
             return None 

@@ -88,12 +88,9 @@ def process_media_in_content(
             "No specific context found"
         )
         
-        # Convert the relative media path to absolute
-        abs_media_path = workspace_root / file_path.lstrip('/')
-        
-        # Generate comprehensive description
+        # Pass the src URL directly to generate_media_description
         gemini_description = generate_media_description(
-            str(abs_media_path),
+            file_path,  # Use the src URL directly
             media_element,
             doc_analysis.doc_summary,
             media_context,
