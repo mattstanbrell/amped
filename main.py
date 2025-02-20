@@ -65,7 +65,7 @@ def process_directory(in_dir: Path, out_dir: Path, platform: str):
                 content = remove_imports(content, index_file)
                 
                 # Process media elements and add Gemini descriptions
-                content = process_media_in_content(content, workspace_root, platform)
+                content, doc_summary = process_media_in_content(content, workspace_root, platform)
                 
                 # Create output directory
                 out_dir.mkdir(parents=True, exist_ok=True)
@@ -82,6 +82,12 @@ def process_directory(in_dir: Path, out_dir: Path, platform: str):
                 # Write the output file
                 output_path = out_dir / "index.md"
                 output_path.write_text(final_content, encoding='utf-8')
+                
+                # Save doc summary if it exists
+                if doc_summary:
+                    summary_path = out_dir / "summary.txt"
+                    print(f"Saving doc summary to: {summary_path}")
+                    summary_path.write_text(doc_summary, encoding='utf-8')
                 
         except Exception as e:
             print(f"Error processing {index_file}: {e}")
@@ -151,8 +157,20 @@ def process_single_file(mdx_path: str, platform: str):
         # Process fragments with the current platform
         processed_content = process_fragments(content, target_path, platform, workspace_root)
         
-        # Create output path
-        output_path = target_path.with_suffix('.md')
+        # Process InlineFilter blocks
+        processed_content = process_inline_filters(processed_content, platform)
+        
+        # Process protected redaction messages
+        processed_content = embed_protected_redaction_message(processed_content, workspace_root)
+        
+        # Remove all imports
+        processed_content = remove_imports(processed_content, target_path)
+        
+        # Create output path in llms-docs/[platform]
+        relative_path = target_path.relative_to(Path("src/pages/[platform]"))
+        out_dir = Path(f"llms-docs/{platform}") / relative_path.parent
+        out_dir.mkdir(parents=True, exist_ok=True)
+        output_path = out_dir / relative_path.name.replace('.mdx', '.md')
         
         # Generate frontmatter
         frontmatter = convert_meta_to_frontmatter(meta)
@@ -161,13 +179,19 @@ def process_single_file(mdx_path: str, platform: str):
         final_content = frontmatter + "\n" + processed_content.lstrip()
         
         # Process media elements and add Gemini descriptions
-        final_content = process_media_in_content(final_content, workspace_root, platform)
+        final_content, doc_summary = process_media_in_content(final_content, workspace_root, platform)
         
         # Ensure exactly one newline at end of file
         final_content = final_content.rstrip() + '\n'
         
         # Write the output file
         output_path.write_text(final_content, encoding='utf-8')
+        
+        # Save doc summary if it exists
+        if doc_summary:
+            summary_path = output_path.parent / "summary.txt"
+            print(f"Saving doc summary to: {summary_path}")
+            summary_path.write_text(doc_summary, encoding='utf-8')
             
     except Exception as e:
         print(f"Error processing file: {e}")
@@ -175,21 +199,34 @@ def process_single_file(mdx_path: str, platform: str):
 
 def main() -> None:
     """Main entry point for the script."""
-    # Check if specific file and platform are provided
-    if len(sys.argv) == 3:
+    # Check arguments
+    if len(sys.argv) == 2:
+        # Process entire [platform] directory for a single platform
+        platform = sys.argv[1]
+        if platform not in PLATFORMS:
+            print(f"Error: Invalid platform '{platform}'. Must be one of: {', '.join(PLATFORMS)}")
+            return
+            
+        print(f"Processing entire [platform] directory for {platform}")
+        src_dir = Path("src/pages/[platform]")
+        if not src_dir.exists():
+            print(f"Error: Source directory {src_dir} not found!")
+            return
+            
+        # Create output directory for this platform
+        out_dir = Path(f"llms-docs/{platform}")
+        
+        # Process the directory tree
+        process_directory(src_dir, out_dir, platform)
+        
+    elif len(sys.argv) == 3:
+        # Process a single file
         mdx_path = sys.argv[1]
         platform = sys.argv[2]
         process_single_file(mdx_path, platform)
             
-    # Original directory processing mode
-    else:
-        if len(sys.argv) != 1:
-            print("Usage:")
-            print("  For directory processing: python main.py")
-            print("  For single file: python main.py <mdx_file_path> <platform>")
-            print("Example: python main.py src/pages/[platform]/start/connect-to-aws-resources/index.mdx nextjs")
-            return
-            
+    # Original directory processing mode for all platforms
+    elif len(sys.argv) == 1:
         # Process each platform
         src_dir = Path("src/pages/[platform]")
         if not src_dir.exists():
@@ -205,7 +242,16 @@ def main() -> None:
             # Process the directory tree
             process_directory(src_dir, out_dir, platform)
             
-        print("Processing complete")
+    else:
+        print("Usage:")
+        print("  For all platforms: python main.py")
+        print("  For single platform: python main.py <platform>")
+        print("  For single file: python main.py <mdx_file_path> <platform>")
+        print("Example: python main.py nextjs")
+        print("Example: python main.py src/pages/[platform]/start/connect-to-aws-resources/index.mdx nextjs")
+        return
+        
+    print("Processing complete")
 
 if __name__ == "__main__":
     main() 

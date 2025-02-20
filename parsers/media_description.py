@@ -11,16 +11,68 @@ import google.generativeai as genai
 from google.ai.generativelanguage_v1beta.types import content
 import time
 import json
+from collections import deque
+from datetime import datetime, timedelta
+
+# ANSI color codes
+GREEN = '\033[32m'
+RED = '\033[31m'
+YELLOW = '\033[33m'
+RESET = '\033[0m'
+
+# Add cache directory constant
+CACHE_DIR = Path.home() / ".llms_cache"
+
+# Create cache directory if it doesn't exist
+CACHE_DIR.mkdir(exist_ok=True)
 
 class MediaContext(BaseModel):
     """Context for a media file within a document."""
     file_path: str
-    context: str
+    description: str
 
 class DocAnalysis(BaseModel):
     """Analysis of a document and its media files."""
     doc_summary: str
     media_contexts: List[MediaContext]
+
+# Rate limiter for Gemini API
+class RateLimiter:
+    def __init__(self, max_requests: int, time_window: int):
+        """Initialize rate limiter.
+        
+        Args:
+            max_requests: Maximum number of requests allowed in the time window
+            time_window: Time window in seconds
+        """
+        self.max_requests = max_requests
+        self.time_window = time_window
+        self.requests = deque()
+    
+    def wait_if_needed(self):
+        """Wait if we've exceeded our rate limit."""
+        now = datetime.now()
+        
+        # Remove requests older than our time window
+        while self.requests and (now - self.requests[0]) > timedelta(seconds=self.time_window):
+            self.requests.popleft()
+        
+        # If we've hit our limit, wait until we can make another request
+        if len(self.requests) >= self.max_requests:
+            wait_time = (self.requests[0] + timedelta(seconds=self.time_window) - now).total_seconds()
+            if wait_time > 0:
+                print(f"\nRate limit reached. Waiting {wait_time:.1f} seconds...")
+                time.sleep(wait_time)
+                # After waiting, clean up old requests again
+                now = datetime.now()
+                while self.requests and (now - self.requests[0]) > timedelta(seconds=self.time_window):
+                    self.requests.popleft()
+        
+        # Add this request to our tracking
+        self.requests.append(now)
+
+# Global rate limiter: 15 requests per minute
+RATE_LIMITER = RateLimiter(max_requests=15, time_window=60)
 
 def download_media_file(src: str) -> Optional[str]:
     """Download a media file from the Amplify docs website.
@@ -36,13 +88,13 @@ def download_media_file(src: str) -> Optional[str]:
     
     # VALIDATE: Must be a markdown src URL starting with /images or /videos
     if not src.startswith(('/images/', '/videos/')):
-        print(f"ERROR: Invalid src URL format - must start with /images/ or /videos/: {src!r}")
+        print(f"{RED}❌ ERROR: Invalid src URL format - must start with /images/ or /videos/: {src!r}{RESET}")
         return None
         
     # VALIDATE: Must not contain Desktop or absolute paths
     if 'Desktop' in src or src.startswith('/Users/'):
-        print(f"ERROR: Received file path instead of markdown src URL: {src!r}")
-        print("This is likely a bug - we should only receive the src from markdown!")
+        print(f"{RED}❌ ERROR: Received file path instead of markdown src URL: {src!r}")
+        print(f"This is likely a bug - we should only receive the src from markdown!{RESET}")
         return None
     
     # Check if this is an image that needs to be converted to WEBP
@@ -58,7 +110,7 @@ def download_media_file(src: str) -> Optional[str]:
             # Insert nextImageExportOptimizer in the same directory
             media_path = f"{directory}/nextImageExportOptimizer/{filename}-opt-1920.WEBP"
         else:
-            print("Invalid image path format")
+            print(f"{RED}❌ Invalid image path format{RESET}")
             return None
     else:
         # For non-image files (e.g., videos), use the original path
@@ -70,31 +122,32 @@ def download_media_file(src: str) -> Optional[str]:
     print(f"Final URL: {url}")
     
     try:
-        # Create a temporary directory if it doesn't exist
-        temp_dir = Path(tempfile.gettempdir()) / "amplify_media"
-        temp_dir.mkdir(exist_ok=True)
+        # Create a sanitized filename for caching
+        safe_filename = src.replace('/', '_').lstrip('_')
+        cache_path = CACHE_DIR / safe_filename
+        print(f"Cache path: {cache_path}")
         
-        # Use a sanitized version of the original filename
-        safe_filename = src.rsplit('/', 1)[-1]  # Just the filename part
-        local_path = temp_dir / f"gen2_{safe_filename}"
-        print(f"Local save path: {local_path}")
-        
-        # Download the file if it doesn't exist
-        if not local_path.exists():
-            print(f"Downloading {url} to {local_path}")
-            response = httpx.get(url)
-            response.raise_for_status()
-            local_path.write_bytes(response.content)
-            print("Download successful")
+        # Check if file exists in cache
+        if cache_path.exists():
+            print(f"{GREEN}✅ Cache HIT - File found in cache{RESET}")
+            return str(cache_path)
             
-        return str(local_path)
+        # If not in cache, download and store
+        print(f"{YELLOW}🔄 Cache MISS - Downloading {url} to {cache_path}{RESET}")
+        response = httpx.get(url)
+        response.raise_for_status()
+        cache_path.write_bytes(response.content)
+        print(f"{GREEN}✅ Download successful{RESET}")
+            
+        return str(cache_path)
         
     except Exception as e:
-        print(f"Error downloading {url}: {e}")
+        print(f"{RED}❌ Error downloading {url}: {e}")
         print(f"Error type: {type(e).__name__}")
         import traceback
         print("Traceback:")
         traceback.print_exc()
+        print(RESET)
         return None
 
 def get_base64_image(src: str) -> Optional[tuple[str, str]]:
@@ -167,14 +220,46 @@ def analyze_doc_with_media(
 
     print("Creating Gemini model instance")
     
+    # Download and prepare all media files first
+    media_files = []
+    for media_type, src, description in media_elements:
+        downloaded_path = download_media_file(src)
+        if not downloaded_path:
+            print(f"Warning: Failed to download {src}")
+            continue
+            
+        is_video = src.lower().endswith(('.mp4', '.mpeg', '.mov', '.avi', '.flv', '.mpg', '.webm', '.wmv', '.3gp'))
+        if is_video:
+            mime_type = f"video/{src.split('.')[-1]}"
+        else:
+            mime_type = f"image/{downloaded_path.lower().split('.')[-1]}"
+            
+        try:
+            media_file = upload_to_gemini(downloaded_path, mime_type=mime_type)
+            media_files.append((src, media_file, description))
+        except Exception as e:
+            print(f"Warning: Failed to upload {src} to Gemini: {e}")
+            continue
+    
+    if not media_files:
+        print("No media files could be processed")
+        return None
+        
+    # Wait for all files to be ready
+    print("\nWaiting for all media files to be processed...")
+    wait_for_files_active([f for _, f, _ in media_files])
+    
+    # Check rate limit before making Gemini request
+    RATE_LIMITER.wait_if_needed()
+    
     # Define the schema for media contexts
     media_context_schema = content.Schema(
         type=content.Type.OBJECT,
         properties={
             "file_path": content.Schema(type=content.Type.STRING),
-            "context": content.Schema(type=content.Type.STRING),
+            "description": content.Schema(type=content.Type.STRING),
         },
-        required=["file_path", "context"]
+        required=["file_path", "description"]
     )
     
     # Define the full response schema
@@ -204,30 +289,48 @@ def analyze_doc_with_media(
         generation_config=generation_config,
     )
     
+    # Start chat with all media files
+    print("\nStarting chat with all media files")
+    chat = model.start_chat(
+        history=[
+            {
+                "role": "user",
+                "parts": [f for _, f, _ in media_files],
+            },
+        ]
+    )
+    
     # Create the prompt for document analysis
     prompt = f"""This is documentation for AWS Amplify Gen 2, a code-first development experience that allows developers to use TypeScript to build full-stack applications on AWS, automatically provisioning the cloud infrastructure based on the app's requirements.
-This specific document is for the {platform} platform.
 
-Please analyze this documentation and its media elements. Return a JSON object with:
-1. A comprehensive summary of the document in the "doc_summary" field
-2. For each media element, provide context about how it fits into the document in the "media_contexts" array
-3. Each media_contexts array item should have two fields:
-   - "file_path": The path of the media file
-   - "context": A description of how this media element fits into the document
+Please analyze these media elements in the context of this {platform} platform documentation. For each image/video, write a SINGLE PARAGRAPH that:
+- Describes what the media shows (UI elements, code, diagrams)
+- Explains the key concepts or features being demonstrated
+- Notes any important steps or details a developer needs to understand
 
-The media elements are:
-{chr(10).join(f'- {typ}: {path} ({desc})' for typ, path, desc in media_elements)}
+Keep each description focused and clear. Aim for concise but comprehensive paragraphs - only go into detail if the media content requires it.
 
-Document content:
+Return a JSON object with:
+1. A brief doc_summary field (we'll use this later)
+2. A media_contexts array where each item has:
+   - file_path: The path of the media file 
+   - description: Your single-paragraph description of what the media shows and explains
+
+The media elements to analyze are:
+{chr(10).join(f'- {src} ({desc})' for src, _, desc in media_files)}
+
+Document content for context:
 {doc_content}"""
 
     print("\nSending prompt to Gemini")
-    print("Prompt length:", len(prompt))
-    print("First 500 chars of prompt:", prompt[:500])
+    print("Full prompt:")
+    print("------------------------")
+    print(prompt)
+    print("------------------------")
     
     try:
         print("\nCalling Gemini generate_content...")
-        response = model.generate_content(prompt)
+        response = chat.send_message(prompt)
         print("Got response from Gemini")
         
         print("\nRaw response from Gemini:")
@@ -244,7 +347,7 @@ Document content:
             media_contexts=[
                 MediaContext(
                     file_path=ctx["file_path"],
-                    context=ctx["context"]
+                    description=ctx["description"]
                 )
                 for ctx in result["media_contexts"]
             ]
@@ -265,10 +368,10 @@ Document content:
             doc_summary="Error analyzing document",
             media_contexts=[
                 MediaContext(
-                    file_path=path,
-                    context=desc or "No context available"
+                    file_path=src,
+                    description=desc or "No context available"
                 )
-                for _, path, desc in media_elements
+                for _, src, desc in media_files
             ]
         )
 
@@ -299,157 +402,4 @@ def wait_for_files_active(files: List) -> None:
         if file.state.name != "ACTIVE":
             raise Exception(f"File {file.name} failed to process")
     print("...all files ready")
-    print()
-
-def generate_media_description(
-    src: str,
-    media_element: str,
-    doc_summary: str,
-    media_context: str,
-    platform: str,
-    api_key: Optional[str] = None
-) -> Optional[str]:
-    """Generate a comprehensive description of a media file using Gemini.
-    
-    Args:
-        src: The src URL from markdown (e.g., /images/example.png)
-        media_element: The original media element from the doc (e.g., ![...] or <Video.../>)
-        doc_summary: Summary of the document this media appears in
-        media_context: Context about this specific media's role in the doc
-        platform: The platform this doc is for
-        api_key: Optional Gemini API key
-        
-    Returns:
-        Generated description if successful, None if failed
-    """
-    if api_key:
-        genai.configure(api_key=api_key)
-    
-    print(f"\nProcessing media file: {src}")
-    
-    # Download the file
-    downloaded_path = download_media_file(src)
-    if not downloaded_path:
-        return None
-    print(f"Downloaded to: {downloaded_path}")
-    
-    # Determine if this is an image or video based on extension
-    is_video = src.lower().endswith(('.mp4', '.mpeg', '.mov', '.avi', '.flv', '.mpg', '.webm', '.wmv', '.3gp'))
-    print(f"Media type: {'video' if is_video else 'image'}")
-    
-    context = f"""This media file appears in AWS Amplify Gen 2 documentation for the {platform} platform.
-
-AWS Amplify Gen 2 is a code-first development experience that allows developers to use TypeScript to build full-stack applications on AWS, automatically provisioning the cloud infrastructure based on the app's requirements.
-
-Document summary: {doc_summary}
-
-This specific media element appears as:
-{media_element}
-
-Context for this media: {media_context}"""
-
-    print("\nContext for analysis:")
-    print("-------------------")
-    print(context)
-    print("-------------------")
-
-    # Configure the model
-    generation_config = {
-        "temperature": 1,
-        "top_p": 0.95,
-        "top_k": 40,
-        "max_output_tokens": 8192,
-        "response_mime_type": "text/plain",
-    }
-
-    model = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
-        generation_config=generation_config,
-    )
-    
-    if is_video:
-        try:
-            # Upload the video and wait for processing
-            mime_type = f"video/{src.split('.')[-1]}"
-            print(f"\nUploading video with MIME type: {mime_type}")
-            video_file = upload_to_gemini(downloaded_path, mime_type=mime_type)
-            wait_for_files_active([video_file])
-            
-            # Start chat with video context
-            print("\nStarting chat with video context")
-            chat = model.start_chat(
-                history=[
-                    {
-                        "role": "user",
-                        "parts": [video_file],
-                    },
-                ]
-            )
-            
-            # Send the analysis prompt
-            prompt = f"""{context}
-
-Please provide a concise description of this video that captures the key information a reader needs to understand what it demonstrates. Focus on what actions are shown and their purpose. Keep the description brief but complete."""
-
-            print("\nSending analysis prompt:")
-            print("-------------------")
-            print(prompt)
-            print("-------------------")
-            
-            response = chat.send_message(prompt)
-            print("\nReceived response:")
-            print("-------------------")
-            print(response.text)
-            print("-------------------")
-            
-            return response.text
-            
-        except Exception as e:
-            print(f"Error processing video {downloaded_path}: {e}")
-            return None
-            
-    else:
-        img_data = get_base64_image(src)
-        if not img_data:
-            return None
-            
-        mime_type, base64_data = img_data
-        print(f"\nUploading image with MIME type: {mime_type}")
-        
-        try:
-            # Upload the image and wait for processing
-            image_file = upload_to_gemini(downloaded_path, mime_type=mime_type)
-            wait_for_files_active([image_file])
-            
-            # Start chat with image context
-            print("\nStarting chat with image context")
-            chat = model.start_chat(
-                history=[
-                    {
-                        "role": "user",
-                        "parts": [image_file],
-                    },
-                ]
-            )
-            
-            # Send the analysis prompt
-            prompt = f"""{context}
-
-Please provide a concise description of this image that captures the key information a reader needs to understand what it shows. Focus on what is being displayed and its purpose. Keep the description brief but complete."""
-
-            print("\nSending analysis prompt:")
-            print("-------------------")
-            print(prompt)
-            print("-------------------")
-            
-            response = chat.send_message(prompt)
-            print("\nReceived response:")
-            print("-------------------")
-            print(response.text)
-            print("-------------------")
-            
-            return response.text
-            
-        except Exception as e:
-            print(f"Error processing image {downloaded_path}: {e}")
-            return None 
+    print() 
